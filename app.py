@@ -7,11 +7,8 @@ CLIENT_ID     = st.secrets["CLIENT_ID"]
 WORKBOOK_PATH = st.secrets["WORKBOOK_PATH"]  # e.g. "/me/drive/root:/Documents/CSW Savings Calculator 2_0_0_Unlocked.xlsx"
 
 GRAPH = "https://graph.microsoft.com/v1.0"
-SCOPES = [
-    "https://graph.microsoft.com/User.Read",
-    "https://graph.microsoft.com/Files.ReadWrite",
-    "offline_access",
-]
+SCOPES = ["User.Read", "Files.ReadWrite", "offline_access"]
+
 
 
 # ------------------ AUTH: Device Code flow ------------------
