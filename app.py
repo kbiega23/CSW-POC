@@ -1,4 +1,4 @@
-# app.py — Winsert Savings Calculator (Office) — Wizard UI with HVAC in Step 2
+# app.py — Winsert Savings Calculator (Office) — Wizard UI with friendly formatting
 import re
 import requests
 import streamlit as st
@@ -154,6 +154,45 @@ def get_states_and_cities(token: str, sid: str):
     return states, state_to_cities
 
 # =========================
+# Formatting helpers
+# =========================
+def _to_float(x):
+    try:
+        if x in (None, ""): return None
+        if isinstance(x, (int, float)): return float(x)
+        s = str(x).replace(",", "").strip()
+        if s.endswith("%"):
+            return float(s[:-1]) / 100.0
+        return float(s)
+    except Exception:
+        return None
+
+def fmt_pct_one_decimal(x):
+    """Show as percentage with 1 decimal; treat <=1 as fraction, >1 as already percent."""
+    v = _to_float(x)
+    if v is None: return "—"
+    if v <= 1.0:
+        v = v * 100.0
+    return f"{v:.1f}%"
+
+def fmt_int_units(x, units=""):
+    """Nearest whole number with thousands separator + units."""
+    v = _to_float(x)
+    if v is None: return "—"
+    return f"{round(v):,}{(' ' + units) if units else ''}"
+
+def fmt_money_two_decimals(x):
+    """$ with cents, thousands separator."""
+    v = _to_float(x)
+    if v is None: return "—"
+    return f"${v:,.2f}"
+
+def fmt_number_no_decimals(x, units=""):
+    v = _to_float(x)
+    if v is None: return "—"
+    return f"{round(v):,}{(' ' + units) if units else ''}"
+
+# =========================
 # Wizard helpers
 # =========================
 def set_step(n: int):
@@ -192,7 +231,7 @@ def write_step2_and_get_wwr(token, sid, building_area, floors, hvac, existw, fue
     if ready:
         set_cell(token, sid, "F18", building_area)
         set_cell(token, sid, "F19", floors)
-        set_cell(token, sid, "F20", hvac)     # <-- HVAC now included
+        set_cell(token, sid, "F20", hvac)
         set_cell(token, sid, "F24", existw)
         set_cell(token, sid, "F21", fuel)
         set_cell(token, sid, "F22", cool)
@@ -214,12 +253,13 @@ def write_step3_inputs(token, sid, cswtyp, elec_rate, gas_rate):
 
 def read_results(token, sid):
     return {
-        "EUI Savings (E14)": get_cell(token, sid, "E14"),
-        "Electric Savings (F31)": get_cell(token, sid, "F31"),
-        "Gas Savings (F33)": get_cell(token, sid, "F33"),
-        "Electric Cost Savings (C35)": get_cell(token, sid, "C35"),
-        "Gas Cost Savings (C36)": get_cell(token, sid, "C36"),
-        "Total Savings (F36)": get_cell(token, sid, "F36"),
+        "eui_savings": get_cell(token, sid, "E14"),
+        "elec_savings": get_cell(token, sid, "F31"),
+        "gas_savings": get_cell(token, sid, "F33"),
+        "elec_cost": get_cell(token, sid, "C35"),
+        "gas_cost": get_cell(token, sid, "C36"),
+        "total_savings": get_cell(token, sid, "F36"),
+        "wwr": get_cell(token, sid, "F28"),
     }
 
 # =========================
@@ -258,8 +298,8 @@ try:
         st.subheader("Climate check")
         if hdd is not None and cdd is not None:
             cols = st.columns(2)
-            cols[0].metric("HDD (C23)", f"{hdd}")
-            cols[1].metric("CDD (C24)", f"{cdd}")
+            cols[0].metric("Heating Degree Days", fmt_number_no_decimals(hdd, "°F·days"))
+            cols[1].metric("Cooling Degree Days", fmt_number_no_decimals(cdd, "°F·days"))
             st.caption("If these look off for the chosen city, pick a different city/state.")
         else:
             st.info("Choose both State and City to see HDD/CDD.")
@@ -274,7 +314,7 @@ try:
         col1, col2 = st.columns(2)
 
         building_area = col1.number_input("Building Area (ft²)", min_value=0.0, step=100.0, key="bldg_area")
-        floors        = col2.number_input("No. of Floors", min_value=0, step=1, key="floors")
+        floors        = col2.number_input("Number of Floors", min_value=0, step=1, key="floors")
 
         # HVAC System Type included here
         hvac = col1.selectbox("HVAC System Type", [
@@ -284,21 +324,21 @@ try:
             "Other",
         ], key="hvac")
 
-        existw = col2.selectbox("Type of Existing Window", ["Single pane", "Double pane"], key="existw")
+        existw = col2.selectbox("Existing Window Type", ["Single pane", "Double pane"], key="existw")
         fuel   = col1.selectbox("Heating Fuel", ["Electric", "Natural Gas", "None"], key="fuel")
         cool   = col2.selectbox("Cooling Installed?", ["Yes", "No"], key="cool")
-        hours  = col1.number_input("Annual Operating Hours", min_value=0, step=100, key="hours")
-        csw_sf = col2.number_input("Sq.ft. of CSW Installed", min_value=0.0, step=50.0, key="csw_sf")
+        hours  = col1.number_input("Annual Operating Hours (hrs/yr)", min_value=0, step=100, key="hours")
+        csw_sf = col2.number_input("CSW Installed (ft²)", min_value=0.0, step=50.0, key="csw_sf")
 
-        # Show WWR once all building info present
+        # Show WWR once all building info present (as percent, 1 decimal)
         wwr = write_step2_and_get_wwr(token, sid, building_area, floors, hvac, existw, fuel, cool, hours, csw_sf)
         st.divider()
         st.subheader("Envelope check")
         if wwr is not None:
-            st.metric("Estimated Window-to-Wall Ratio (F28)", f"{wwr}")
+            st.metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
             st.caption("If WWR seems off, adjust inputs before proceeding.")
         else:
-            st.info("Enter all building details to estimate WWR.")
+            st.info("Enter all building details to estimate Window-to-Wall Ratio.")
 
         nav_buttons(back_to=1, next_to=3, next_label="Next →")
 
@@ -327,28 +367,30 @@ try:
                 set_step(4); st.rerun()
 
     # --------------
-    # STEP 4: Result
+    # STEP 4: Results
     # --------------
     elif step == 4:
         st.header("4) Results")
         try:
             calculate(token, sid)
-            out = read_results(token, sid)
-            # Show nicely
-            st.subheader("Energy & Cost Savings")
-            grid = st.columns(2)
-            grid[0].metric("EUI Savings (E14)", f"{out['EUI Savings (E14)']}")
-            grid[1].metric("Window-to-Wall Ratio (F28)", f"{get_cell(token, sid, 'F28')}")
+            res = read_results(token, sid)
+
+            # EUI Savings & WWR as % (1 decimal)
+            stats = st.columns(2)
+            stats[0].metric("EUI Savings", fmt_pct_one_decimal(res["eui_savings"]))
+            stats[1].metric("Window-to-Wall Ratio", fmt_pct_one_decimal(res["wwr"]))
+
             st.divider()
+            st.subheader("Energy & Cost Savings (Annual)")
             c1, c2 = st.columns(2)
             with c1:
-                st.metric("Electric Savings (F31)", f"{out['Electric Savings (F31)']}")
-                st.metric("Gas Savings (F33)", f"{out['Gas Savings (F33)']}")
+                st.metric("Electric Savings", fmt_int_units(res["elec_savings"], "kWh/yr"))
+                st.metric("Gas Savings", fmt_int_units(res["gas_savings"], "therms/yr"))
+                st.metric("Total Savings", fmt_int_units(res["total_savings"], "$/yr"))
             with c2:
-                st.metric("Electric Cost Savings (C35)", f"{out['Electric Cost Savings (C35)']}")
-                st.metric("Gas Cost Savings (C36)", f"{out['Gas Cost Savings (C36)']}")
-            st.subheader("Total")
-            st.metric("Total Savings (F36)", f"{out['Total Savings (F36)']}")
+                st.metric("Electric Cost Savings", fmt_money_two_decimals(res["elec_cost"]))
+                st.metric("Gas Cost Savings", fmt_money_two_decimals(res["gas_cost"]))
+
         except requests.HTTPError as e:
             st.error(f"HTTP {e.response.status_code}: {e.response.text[:400]}")
 
