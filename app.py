@@ -8,7 +8,7 @@ WORKBOOK_PATH = st.secrets["WORKBOOK_PATH"]  # e.g. "/me/drive/root:/Documents/C
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 # EXACT scopes for Device Code (delegated). Do not fully-qualify with URLs here.
-SCOPES = ["User.Read", "Files.ReadWrite", "offline_access"]
+SCOPES = ["User.Read", "Files.ReadWrite"]
 
 # Debug: show scopes at runtime
 st.write("Auth scopes:", SCOPES, "types:", [type(s) for s in SCOPES])
