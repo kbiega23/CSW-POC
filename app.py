@@ -1,4 +1,5 @@
-# app.py — Winsert Savings Calculator (Office) — Wizard UI with friendly formatting
+# app.py — Winsert Savings Calculator (Office) — Wizard UI with branding & formatting
+import os
 import re
 import requests
 import streamlit as st
@@ -7,7 +8,7 @@ from msal import PublicClientApplication, SerializableTokenCache
 # =========================
 # Config & sanity checks
 # =========================
-SCOPES = ["User.Read", "Files.ReadWrite"]  # Do NOT include 'offline_access'
+SCOPES = ["User.Read", "Files.ReadWrite"]  # keep reserved scopes (offline_access) out
 
 guid = re.compile(r"^[0-9a-fA-F-]{36}$")
 bad = []
@@ -26,6 +27,51 @@ WORKBOOK_PATH = st.secrets["WORKBOOK_PATH"]
 GRAPH = "https://graph.microsoft.com/v1.0"
 
 st.set_page_config(page_title="Winsert Savings Calculator – Office (Wizard)", layout="centered")
+
+# =========================
+# Light blue look & feel
+# =========================
+PRIMARY = "#1a66ff"  # Alpen blue-ish
+ACCENT  = "#0d47a1"
+st.markdown(
+    f"""
+    <style>
+      /* Page width + nicer fonts */
+      .block-container {{ max-width: 950px; }}
+      h1, h2, h3, h4 {{ color: {ACCENT}; }}
+      /* Buttons */
+      div.stButton > button {{
+        background: {PRIMARY}; color: #fff; border: 0; border-radius: 10px; padding: 0.5rem 1rem;
+      }}
+      div.stButton > button:hover {{ filter: brightness(0.95); }}
+      /* Progress bar color */
+      .stProgress > div > div > div > div {{ background-color: {PRIMARY}; }}
+      /* Metrics subtle card look */
+      [data-testid="stMetric"] {{
+        background: #f7faff; border: 1px solid #e6efff; border-radius: 12px; padding: .75rem;
+      }}
+      /* Divider subtle */
+      hr {{ border-top: 1px solid #e6efff; }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Optional logo (either set LOGO_URL in secrets or put logo.png in the repo root)
+def show_logo():
+    logo_url = st.secrets.get("LOGO_URL", "").strip()
+    with st.container():
+        cols = st.columns([1, 9])
+        with cols[0]:
+            try:
+                if logo_url:
+                    st.image(logo_url, use_container_width=True)
+                elif os.path.exists("logo.png"):
+                    st.image("logo.png", use_container_width=True)
+            except Exception:
+                pass
+        with cols[1]:
+            st.title("Winsert Savings Calculator")
 
 # =========================
 # Token cache helpers
@@ -187,10 +233,15 @@ def fmt_money_two_decimals(x):
     if v is None: return "—"
     return f"${v:,.2f}"
 
-def fmt_number_no_decimals(x, units=""):
+def fmt_money_no_decimals(x):
     v = _to_float(x)
     if v is None: return "—"
-    return f"{round(v):,}{(' ' + units) if units else ''}"
+    return f"${round(v):,}"
+
+def fmt_int(x):
+    v = _to_float(x)
+    if v is None: return "—"
+    return f"{round(v):,}"
 
 # =========================
 # Wizard helpers
@@ -200,6 +251,10 @@ def set_step(n: int):
 
 def get_step() -> int:
     return st.session_state.get("step", 1)
+
+def progress_bar(step: int, total: int = 4):
+    pct = int(step / total * 100)
+    st.progress(step / total, text=f"Step {step} of {total}")
 
 def nav_buttons(back_to=None, next_to=None, next_label="Next"):
     cols = st.columns([1, 1, 6, 2])
@@ -268,11 +323,11 @@ def read_results(token, sid):
 token = acquire_token()
 sid = create_session(token)
 
-# Global title for every step
-st.title("Winsert Savings Calculator")
-
-# Step indicator
+# Branding + progress
+show_logo()
 step = get_step()
+progress_bar(step)
+
 st.markdown(f"### Step {step} of 4")
 
 try:
@@ -292,14 +347,14 @@ try:
         state = col1.selectbox("State", states_list, key="state_sel", on_change=_on_state_change)
         city = col2.selectbox("City", state_to_cities.get(state, []), key="city_sel")
 
-        # Immediate gut check: HDD/CDD once both chosen
+        # Immediate gut check: HDD/CDD once both chosen (unitless)
         hdd, cdd = write_step1_and_get_hdd_cdd(token, sid, state, city)
         st.divider()
         st.subheader("Climate check")
         if hdd is not None and cdd is not None:
             cols = st.columns(2)
-            cols[0].metric("Heating Degree Days", fmt_number_no_decimals(hdd, "°F·days"))
-            cols[1].metric("Cooling Degree Days", fmt_number_no_decimals(cdd, "°F·days"))
+            cols[0].metric("Heating Degree Days", fmt_int(hdd))
+            cols[1].metric("Cooling Degree Days", fmt_int(cdd))
             st.caption("If these look off for the chosen city, pick a different city/state.")
         else:
             st.info("Choose both State and City to see HDD/CDD.")
@@ -316,7 +371,6 @@ try:
         building_area = col1.number_input("Building Area (ft²)", min_value=0.0, step=100.0, key="bldg_area")
         floors        = col2.number_input("Number of Floors", min_value=0, step=1, key="floors")
 
-        # HVAC System Type included here
         hvac = col1.selectbox("HVAC System Type", [
             "Packaged VAV with electric reheat",
             "Packaged VAV with hydronic reheat",
@@ -330,7 +384,7 @@ try:
         hours  = col1.number_input("Annual Operating Hours (hrs/yr)", min_value=0, step=100, key="hours")
         csw_sf = col2.number_input("CSW Installed (ft²)", min_value=0.0, step=50.0, key="csw_sf")
 
-        # Show WWR once all building info present (as percent, 1 decimal)
+        # Show WWR (as % with 1 decimal) once all building info present
         wwr = write_step2_and_get_wwr(token, sid, building_area, floors, hvac, existw, fuel, cool, hours, csw_sf)
         st.divider()
         st.subheader("Envelope check")
@@ -353,7 +407,6 @@ try:
         elec_rate = col2.number_input("Electric Rate ($/kWh)", min_value=0.0, step=0.01, key="elec_rate")
         gas_rate  = col1.number_input("Natural Gas Rate ($/therm)", min_value=0.0, step=0.01, key="gas_rate")
 
-        # Write step 3 inputs on next to precompute results
         cols = st.columns([1, 1, 6, 2])
         with cols[0]:
             if st.button("← Back", use_container_width=True):
@@ -375,21 +428,26 @@ try:
             calculate(token, sid)
             res = read_results(token, sid)
 
-            # EUI Savings & WWR as % (1 decimal)
-            stats = st.columns(2)
-            stats[0].metric("EUI Savings", fmt_pct_one_decimal(res["eui_savings"]))
-            stats[1].metric("Window-to-Wall Ratio", fmt_pct_one_decimal(res["wwr"]))
+            # Group 1: Energy savings (EUI %, Electric kWh, Gas therms)
+            st.subheader("Energy Savings")
+            g1 = st.columns(3)
+            g1[0].metric("EUI Savings", fmt_pct_one_decimal(res["eui_savings"]))
+            g1[1].metric("Electric Savings", fmt_int_units(res["elec_savings"], "kWh/yr"))
+            g1[2].metric("Gas Savings", fmt_int_units(res["gas_savings"], "therms/yr"))
 
             st.divider()
-            st.subheader("Energy & Cost Savings (Annual)")
-            c1, c2 = st.columns(2)
-            with c1:
-                st.metric("Electric Savings", fmt_int_units(res["elec_savings"], "kWh/yr"))
-                st.metric("Gas Savings", fmt_int_units(res["gas_savings"], "therms/yr"))
-                st.metric("Total Savings", fmt_int_units(res["total_savings"], "$/yr"))
-            with c2:
-                st.metric("Electric Cost Savings", fmt_money_two_decimals(res["elec_cost"]))
-                st.metric("Gas Cost Savings", fmt_money_two_decimals(res["gas_cost"]))
+
+            # Group 2: Cost impact (Electric $, Gas $, Total $)
+            st.subheader("Cost Impact")
+            g2 = st.columns(3)
+            g2[0].metric("Electric Cost Savings", fmt_money_two_decimals(res["elec_cost"]))
+            g2[1].metric("Gas Cost Savings", fmt_money_two_decimals(res["gas_cost"]))
+            g2[2].metric("Total Savings", fmt_money_no_decimals(res["total_savings"]))
+
+            # Optional: show WWR again (styled)
+            st.divider()
+            st.subheader("Envelope")
+            st.metric("Window-to-Wall Ratio", fmt_pct_one_decimal(res["wwr"]))
 
         except requests.HTTPError as e:
             st.error(f"HTTP {e.response.status_code}: {e.response.text[:400]}")
@@ -407,5 +465,4 @@ try:
                 set_step(1); st.rerun()
 
 finally:
-    # Close workbook session to be tidy (values are persisted due to persistChanges=True)
     close_session(token, sid)
