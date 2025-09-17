@@ -1,4 +1,7 @@
-# app.py — Winsert Savings Calculator (Office) — Wizard UI with branding & formatting
+# app.py — Winsert Savings Calculator (Office)
+# Wizard UI with blue branding, token cache, Lists-driven State/City,
+# Step 2 & Step 3 as FORMS (single calc per step), and friendly result formatting.
+
 import os
 import re
 import requests
@@ -26,38 +29,32 @@ CLIENT_ID     = st.secrets["CLIENT_ID"]
 WORKBOOK_PATH = st.secrets["WORKBOOK_PATH"]
 GRAPH = "https://graph.microsoft.com/v1.0"
 
-st.set_page_config(page_title="Winsert Savings Calculator – Office (Wizard)", layout="centered")
+st.set_page_config(page_title="Winsert Savings Calculator – Office", layout="centered")
 
 # =========================
-# Light blue look & feel
+# Blue look & feel + progress bar + optional logo
 # =========================
-PRIMARY = "#1a66ff"  # Alpen blue-ish
+PRIMARY = "#1a66ff"
 ACCENT  = "#0d47a1"
 st.markdown(
     f"""
     <style>
-      /* Page width + nicer fonts */
       .block-container {{ max-width: 950px; }}
       h1, h2, h3, h4 {{ color: {ACCENT}; }}
-      /* Buttons */
       div.stButton > button {{
         background: {PRIMARY}; color: #fff; border: 0; border-radius: 10px; padding: 0.5rem 1rem;
       }}
       div.stButton > button:hover {{ filter: brightness(0.95); }}
-      /* Progress bar color */
       .stProgress > div > div > div > div {{ background-color: {PRIMARY}; }}
-      /* Metrics subtle card look */
       [data-testid="stMetric"] {{
         background: #f7faff; border: 1px solid #e6efff; border-radius: 12px; padding: .75rem;
       }}
-      /* Divider subtle */
       hr {{ border-top: 1px solid #e6efff; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# Optional logo (either set LOGO_URL in secrets or put logo.png in the repo root)
 def show_logo():
     logo_url = st.secrets.get("LOGO_URL", "").strip()
     with st.container():
@@ -72,6 +69,9 @@ def show_logo():
                 pass
         with cols[1]:
             st.title("Winsert Savings Calculator")
+
+def progress_bar(step: int, total: int = 4):
+    st.progress(step / total, text=f"Step {step} of {total}")
 
 # =========================
 # Token cache helpers
@@ -134,7 +134,7 @@ def _item_base(token: str) -> str:
 def create_session(token: str) -> str:
     r = requests.post(_item_base(token) + "/createSession",
                       headers={"Authorization": f"Bearer {token}"},
-                      json={"persistChanges": True})
+                      json={"persistChanges": True})  # current behavior: write back
     r.raise_for_status()
     return r.json()["id"]
 
@@ -252,20 +252,8 @@ def set_step(n: int):
 def get_step() -> int:
     return st.session_state.get("step", 1)
 
-def progress_bar(step: int, total: int = 4):
-    pct = int(step / total * 100)
-    st.progress(step / total, text=f"Step {step} of {total}")
-
-def nav_buttons(back_to=None, next_to=None, next_label="Next"):
-    cols = st.columns([1, 1, 6, 2])
-    with cols[0]:
-        if back_to and st.button("← Back", use_container_width=True):
-            set_step(back_to); st.rerun()
-    with cols[-1]:
-        if next_to and st.button(next_label, use_container_width=True):
-            set_step(next_to); st.rerun()
-
-def write_step1_and_get_hdd_cdd(token, sid, state, city):
+# Step 1 immediate write/recalc helper
+def apply_step1_and_get_hdd_cdd(token, sid, state, city):
     if state and city:
         set_cell(token, sid, "C18", state)
         set_cell(token, sid, "C19", city)
@@ -275,46 +263,75 @@ def write_step1_and_get_hdd_cdd(token, sid, state, city):
         return hdd, cdd
     return None, None
 
-def write_step2_and_get_wwr(token, sid, building_area, floors, hvac, existw, fuel, cool, hours, csw_sf):
-    ready = all([
-        building_area is not None and building_area > 0,
-        floors is not None and floors >= 0,
-        hvac, existw, fuel, cool,
-        hours is not None and hours > 0,
-        csw_sf is not None and csw_sf > 0
-    ])
-    if ready:
-        set_cell(token, sid, "F18", building_area)
-        set_cell(token, sid, "F19", floors)
-        set_cell(token, sid, "F20", hvac)
-        set_cell(token, sid, "F24", existw)
-        set_cell(token, sid, "F21", fuel)
-        set_cell(token, sid, "F22", cool)
-        set_cell(token, sid, "F23", hours)
-        set_cell(token, sid, "F27", csw_sf)
-        calculate(token, sid)
-        wwr = get_cell(token, sid, "F28")
-        return wwr
-    return None
+# Step 2 single-shot apply via FORM
+def apply_step2(token, sid):
+    """Validate Step 2 inputs, write them once, calc, return (ok, WWR)."""
+    bldg_area = st.session_state.get("bldg_area")
+    floors    = st.session_state.get("floors")
+    hvac      = st.session_state.get("hvac")
+    existw    = st.session_state.get("existw")
+    fuel      = st.session_state.get("fuel")
+    cool      = st.session_state.get("cool")
+    hours     = st.session_state.get("hours")
+    csw_sf    = st.session_state.get("csw_sf")
 
-def write_step3_inputs(token, sid, cswtyp, elec_rate, gas_rate):
-    if cswtyp:
-        set_cell(token, sid, "F26", cswtyp)
-    if elec_rate is not None:
-        set_cell(token, sid, "C27", elec_rate)
-    if gas_rate is not None:
-        set_cell(token, sid, "C28", gas_rate)
+    ready = all([
+        isinstance(bldg_area, (int, float)) and bldg_area > 0,
+        isinstance(floors, (int, float)) and floors >= 0,
+        hvac, existw, fuel, cool,
+        isinstance(hours, (int, float)) and hours > 0,
+        isinstance(csw_sf, (int, float)) and csw_sf > 0,
+    ])
+    if not ready:
+        return False, None
+
+    set_cell(token, sid, "F18", bldg_area)
+    set_cell(token, sid, "F19", floors)
+    set_cell(token, sid, "F20", hvac)
+    set_cell(token, sid, "F24", existw)
+    set_cell(token, sid, "F21", fuel)
+    set_cell(token, sid, "F22", cool)
+    set_cell(token, sid, "F23", hours)
+    set_cell(token, sid, "F27", csw_sf)
+
     calculate(token, sid)
+    wwr = get_cell(token, sid, "F28")
+
+    st.session_state["wwr_latest"] = wwr
+    st.session_state["step2_applied"] = True
+    return True, wwr
+
+# Step 3 single-shot apply via FORM
+def apply_step3(token, sid):
+    cswtyp    = st.session_state.get("cswtyp")
+    elec_rate = st.session_state.get("elec_rate")
+    gas_rate  = st.session_state.get("gas_rate")
+
+    ready = all([
+        bool(cswtyp),
+        (elec_rate is not None) and (elec_rate >= 0.0),
+        (gas_rate  is not None) and (gas_rate  >= 0.0),
+    ])
+    if not ready:
+        return False
+
+    set_cell(token, sid, "F26", cswtyp)
+    set_cell(token, sid, "C27", elec_rate)
+    set_cell(token, sid, "C28", gas_rate)
+    calculate(token, sid)
+
+    st.session_state["step3_applied"] = True
+    return True
 
 def read_results(token, sid):
     return {
-        "eui_savings": get_cell(token, sid, "E14"),
+        "eui_savings":  get_cell(token, sid, "E14"),
         "elec_savings": get_cell(token, sid, "F31"),
-        "gas_savings": get_cell(token, sid, "F33"),
-        "elec_cost": get_cell(token, sid, "C35"),
-        "gas_cost": get_cell(token, sid, "C36"),
-        "total_savings": get_cell(token, sid, "F36"),
-        "wwr": get_cell(token, sid, "F28"),
+        "gas_savings":  get_cell(token, sid, "F33"),
+        "elec_cost":    get_cell(token, sid, "C35"),
+        "gas_cost":     get_cell(token, sid, "C36"),
+        "total_savings":get_cell(token, sid, "F36"),
+        "wwr":          get_cell(token, sid, "F28"),
     }
 
 # =========================
@@ -323,11 +340,9 @@ def read_results(token, sid):
 token = acquire_token()
 sid = create_session(token)
 
-# Branding + progress
 show_logo()
 step = get_step()
 progress_bar(step)
-
 st.markdown(f"### Step {step} of 4")
 
 try:
@@ -335,7 +350,7 @@ try:
     states_list, state_to_cities = get_states_and_cities(token, sid)
 
     # -----------------
-    # STEP 1: Location
+    # STEP 1: Location (immediate HDD/CDD)
     # -----------------
     if step == 1:
         st.header("1) Select Location")
@@ -345,79 +360,106 @@ try:
             st.session_state.pop("city_sel", None)
 
         state = col1.selectbox("State", states_list, key="state_sel", on_change=_on_state_change)
-        city = col2.selectbox("City", state_to_cities.get(state, []), key="city_sel")
+        city  = col2.selectbox("City", state_to_cities.get(state, []), key="city_sel")
 
-        # Immediate gut check: HDD/CDD once both chosen (unitless)
-        hdd, cdd = write_step1_and_get_hdd_cdd(token, sid, state, city)
+        hdd, cdd = apply_step1_and_get_hdd_cdd(token, sid, state, city)
         st.divider()
         st.subheader("Climate check")
         if hdd is not None and cdd is not None:
             cols = st.columns(2)
-            cols[0].metric("Heating Degree Days", fmt_int(hdd))
-            cols[1].metric("Cooling Degree Days", fmt_int(cdd))
+            cols[0].metric("Heating Degree Days", fmt_int(hdd))   # unitless per your request
+            cols[1].metric("Cooling Degree Days", fmt_int(cdd))   # unitless
             st.caption("If these look off for the chosen city, pick a different city/state.")
         else:
             st.info("Choose both State and City to see HDD/CDD.")
 
-        nav_buttons(back_to=None, next_to=2, next_label="Next →")
+        cols = st.columns([1, 1, 6, 2])
+        with cols[-1]:
+            if st.button("Next →", use_container_width=True):
+                set_step(2); st.rerun()
 
     # -------------------------
-    # STEP 2: Building details
+    # STEP 2: Building details (FORM)
     # -------------------------
     elif step == 2:
         st.header("2) Building Information")
-        col1, col2 = st.columns(2)
 
-        building_area = col1.number_input("Building Area (ft²)", min_value=0.0, step=100.0, key="bldg_area")
-        floors        = col2.number_input("Number of Floors", min_value=0, step=1, key="floors")
+        # Back button (outside the form so it doesn't submit)
+        cols_top = st.columns([1, 9])
+        with cols_top[0]:
+            if st.button("← Back", use_container_width=True):
+                set_step(1); st.rerun()
 
-        hvac = col1.selectbox("HVAC System Type", [
-            "Packaged VAV with electric reheat",
-            "Packaged VAV with hydronic reheat",
-            "Built-up VAV with hydronic reheat",
-            "Other",
-        ], key="hvac")
+        with st.form("step2_form", clear_on_submit=False):
+            col1, col2 = st.columns(2)
 
-        existw = col2.selectbox("Existing Window Type", ["Single pane", "Double pane"], key="existw")
-        fuel   = col1.selectbox("Heating Fuel", ["Electric", "Natural Gas", "None"], key="fuel")
-        cool   = col2.selectbox("Cooling Installed?", ["Yes", "No"], key="cool")
-        hours  = col1.number_input("Annual Operating Hours (hrs/yr)", min_value=0, step=100, key="hours")
-        csw_sf = col2.number_input("CSW Installed (ft²)", min_value=0.0, step=50.0, key="csw_sf")
+            col1.number_input("Building Area (ft²)", min_value=0.0, step=100.0, key="bldg_area")
+            col2.number_input("Number of Floors",   min_value=0,   step=1,      key="floors")
 
-        # Show WWR (as % with 1 decimal) once all building info present
-        wwr = write_step2_and_get_wwr(token, sid, building_area, floors, hvac, existw, fuel, cool, hours, csw_sf)
-        st.divider()
-        st.subheader("Envelope check")
-        if wwr is not None:
-            st.metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
-            st.caption("If WWR seems off, adjust inputs before proceeding.")
-        else:
-            st.info("Enter all building details to estimate Window-to-Wall Ratio.")
+            col1.selectbox("HVAC System Type", [
+                "Packaged VAV with electric reheat",
+                "Packaged VAV with hydronic reheat",
+                "Built-up VAV with hydronic reheat",
+                "Other",
+            ], key="hvac")
 
-        nav_buttons(back_to=1, next_to=3, next_label="Next →")
+            col2.selectbox("Existing Window Type", ["Single pane", "Double pane"], key="existw")
+            col1.selectbox("Heating Fuel", ["Electric", "Natural Gas", "None"],    key="fuel")
+            col2.selectbox("Cooling Installed?", ["Yes", "No"],                    key="cool")
+            col1.number_input("Annual Operating Hours (hrs/yr)", min_value=0, step=100, key="hours")
+            col2.number_input("CSW Installed (ft²)",             min_value=0.0, step=50.0, key="csw_sf")
+
+            st.caption("Fill all fields, then click **Apply & Check WWR** once.")
+            fcols = st.columns([1, 1, 6, 2])
+            apply2 = fcols[0].form_submit_button("Apply & Check WWR")
+            next2  = fcols[-1].form_submit_button("Next →")
+
+        if apply2 or next2:
+            ok, wwr = apply_step2(token, sid)
+            if not ok:
+                st.warning("Please complete all building fields before proceeding.")
+            else:
+                st.success("Building info applied.")
+                st.metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
+                if next2:
+                    set_step(3); st.rerun()
+        elif st.session_state.get("step2_applied") and st.session_state.get("wwr_latest") is not None:
+            st.divider()
+            st.subheader("Envelope check")
+            st.metric("Window-to-Wall Ratio", fmt_pct_one_decimal(st.session_state["wwr_latest"]))
+            st.caption("If WWR seems off, adjust inputs and click Apply again.")
 
     # ---------------------
-    # STEP 3: Rates & CSW
+    # STEP 3: Rates & CSW (FORM)
     # ---------------------
     elif step == 3:
         st.header("3) Secondary Window & Rates")
-        col1, col2 = st.columns(2)
 
-        cswtyp    = col1.selectbox("Type of CSW Analyzed", ["Single", "Double"], key="cswtyp")
-        elec_rate = col2.number_input("Electric Rate ($/kWh)", min_value=0.0, step=0.01, key="elec_rate")
-        gas_rate  = col1.number_input("Natural Gas Rate ($/therm)", min_value=0.0, step=0.01, key="gas_rate")
-
-        cols = st.columns([1, 1, 6, 2])
-        with cols[0]:
+        # Back button (outside the form)
+        cols_top = st.columns([1, 9])
+        with cols_top[0]:
             if st.button("← Back", use_container_width=True):
                 set_step(2); st.rerun()
-        with cols[-1]:
-            if st.button("See Results →", use_container_width=True):
-                try:
-                    write_step3_inputs(token, sid, cswtyp, elec_rate, gas_rate)
-                except requests.HTTPError as e:
-                    st.error(f"HTTP {e.response.status_code}: {e.response.text[:400]}")
-                set_step(4); st.rerun()
+
+        with st.form("step3_form", clear_on_submit=False):
+            col1, col2 = st.columns(2)
+            col1.selectbox("Type of CSW Analyzed", ["Single", "Double"], key="cswtyp")
+            col2.number_input("Electric Rate ($/kWh)", min_value=0.0, step=0.01, key="elec_rate")
+            col1.number_input("Natural Gas Rate ($/therm)", min_value=0.0, step=0.01, key="gas_rate")
+
+            st.caption("Enter all values, then click **Apply Rates** once.")
+            fcols = st.columns([1, 1, 6, 2])
+            apply3 = fcols[0].form_submit_button("Apply Rates")
+            next3  = fcols[-1].form_submit_button("See Results →")
+
+        if apply3 or next3:
+            ok = apply_step3(token, sid)
+            if not ok:
+                st.warning("Please complete the CSW type and both rates before proceeding.")
+            else:
+                st.success("Rates applied.")
+                if next3:
+                    set_step(4); st.rerun()
 
     # --------------
     # STEP 4: Results
@@ -431,9 +473,9 @@ try:
             # Group 1: Energy savings (EUI %, Electric kWh, Gas therms)
             st.subheader("Energy Savings")
             g1 = st.columns(3)
-            g1[0].metric("EUI Savings", fmt_pct_one_decimal(res["eui_savings"]))
-            g1[1].metric("Electric Savings", fmt_int_units(res["elec_savings"], "kWh/yr"))
-            g1[2].metric("Gas Savings", fmt_int_units(res["gas_savings"], "therms/yr"))
+            g1[0].metric("EUI Savings",       fmt_pct_one_decimal(res["eui_savings"]))
+            g1[1].metric("Electric Savings",  fmt_int_units(res["elec_savings"], "kWh/yr"))
+            g1[2].metric("Gas Savings",       fmt_int_units(res["gas_savings"], "therms/yr"))
 
             st.divider()
 
@@ -441,10 +483,10 @@ try:
             st.subheader("Cost Impact")
             g2 = st.columns(3)
             g2[0].metric("Electric Cost Savings", fmt_money_two_decimals(res["elec_cost"]))
-            g2[1].metric("Gas Cost Savings", fmt_money_two_decimals(res["gas_cost"]))
-            g2[2].metric("Total Savings", fmt_money_no_decimals(res["total_savings"]))
+            g2[1].metric("Gas Cost Savings",      fmt_money_two_decimals(res["gas_cost"]))
+            g2[2].metric("Total Savings",         fmt_money_no_decimals(res["total_savings"]))
 
-            # Optional: show WWR again (styled)
+            # Optional: show WWR again
             st.divider()
             st.subheader("Envelope")
             st.metric("Window-to-Wall Ratio", fmt_pct_one_decimal(res["wwr"]))
@@ -458,11 +500,12 @@ try:
                 set_step(3); st.rerun()
         with cols[-1]:
             if st.button("Start Over", use_container_width=True):
-                # Clear step + keep token cache so you don't have to log in again
+                # Keep login & drive item, clear the rest
                 for k in list(st.session_state.keys()):
                     if k not in ("msal_cache_serialized", "drive_item"):
                         del st.session_state[k]
                 set_step(1); st.rerun()
 
 finally:
+    # Current behavior: close workbook session each run (changes persist)
     close_session(token, sid)
