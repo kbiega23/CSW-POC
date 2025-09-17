@@ -1,4 +1,4 @@
-# app.py
+# app.py — Winsert Savings Calculator (Office) — Wizard UI with HVAC in Step 2
 import re
 import requests
 import streamlit as st
@@ -7,7 +7,7 @@ from msal import PublicClientApplication, SerializableTokenCache
 # =========================
 # Config & sanity checks
 # =========================
-SCOPES = ["User.Read", "Files.ReadWrite"]  # Do NOT include 'offline_access' here
+SCOPES = ["User.Read", "Files.ReadWrite"]  # Do NOT include 'offline_access'
 
 guid = re.compile(r"^[0-9a-fA-F-]{36}$")
 bad = []
@@ -25,26 +25,22 @@ CLIENT_ID     = st.secrets["CLIENT_ID"]
 WORKBOOK_PATH = st.secrets["WORKBOOK_PATH"]
 GRAPH = "https://graph.microsoft.com/v1.0"
 
-st.set_page_config(page_title="CSW Savings Estimator – Office (POC)", layout="centered")
-st.title("CSW Savings Estimator – Office (POC)")
+st.set_page_config(page_title="Winsert Savings Calculator – Office (Wizard)", layout="centered")
 
 # =========================
-# MSAL token cache helpers
+# Token cache helpers
 # =========================
 def _get_cache_obj() -> SerializableTokenCache:
-    """Load (or create) an MSAL token cache object from session_state."""
     cache = SerializableTokenCache()
     serialized = st.session_state.get("msal_cache_serialized")
     if serialized:
         try:
             cache.deserialize(serialized)
         except Exception:
-            # Corrupt/empty cache: start fresh
             cache = SerializableTokenCache()
     return cache
 
 def _save_cache_obj(cache: SerializableTokenCache):
-    """Persist the MSAL token cache back into session_state."""
     try:
         st.session_state["msal_cache_serialized"] = cache.serialize()
     except Exception:
@@ -58,34 +54,23 @@ def _build_pca(cache: SerializableTokenCache) -> PublicClientApplication:
     )
 
 def acquire_token() -> str:
-    """
-    Acquire an access token using MSAL Device Code flow, but:
-    - Try silent acquisition first (uses cached refresh token).
-    - Only prompt with a device code if needed.
-    """
     cache = _get_cache_obj()
     app = _build_pca(cache)
-
-    # 1) Silent first
     accounts = app.get_accounts()
     if accounts:
         res = app.acquire_token_silent(SCOPES, account=accounts[0])
         if "access_token" in res:
             _save_cache_obj(cache)
             return res["access_token"]
-
-    # 2) Device code only if silent failed
     flow = app.initiate_device_flow(scopes=SCOPES)
     if "user_code" not in flow:
         st.error("Failed to start device login.")
         st.stop()
     st.info(f"To authenticate, open **{flow['verification_uri']}** and enter code **{flow['user_code']}**")
-    res = app.acquire_token_by_device_flow(flow)  # blocks until you complete login
-
+    res = app.acquire_token_by_device_flow(flow)
     if "access_token" not in res:
         st.error(f"Auth error: {res.get('error_description', res)}")
         st.stop()
-
     _save_cache_obj(cache)
     return res["access_token"]
 
@@ -93,7 +78,6 @@ def acquire_token() -> str:
 # Graph helpers
 # =========================
 def _item_base(token: str) -> str:
-    """Return the workbook base URL (drives/{driveId}/items/{itemId}/workbook)."""
     if "drive_item" not in st.session_state:
         r = requests.get(f"{GRAPH}{WORKBOOK_PATH}", headers={"Authorization": f"Bearer {token}"})
         r.raise_for_status()
@@ -145,12 +129,7 @@ def calculate(token: str, sid: str):
 # Lists sheet: States & Cities
 # =========================
 def get_states_and_cities(token: str, sid: str):
-    """
-    Reads Lists!C1:BA100:
-      - Row 1: state names (headers)
-      - Rows below: cities
-    Returns: (states_list, {state: [cities...]})
-    """
+    """Reads Lists!C1:BA100 → row1 = states, rows below = cities."""
     rng = "Lists!C1:BA100"
     r = requests.get(
         _item_base(token) + f"/worksheets('Lists')/range(address='{rng}')",
@@ -160,18 +139,13 @@ def get_states_and_cities(token: str, sid: str):
     values = r.json().get("values", [])
     if not values:
         return [], {}
-
     num_cols = len(values[0])
-    state_to_cities = {}
-    states = []
+    state_to_cities, states = {}, []
     for c in range(num_cols):
         col = [row[c] if c < len(row) else None for row in values]
-        if not col:
+        if not col or not col[0]:
             continue
-        header = col[0]
-        if not header:
-            continue
-        state = str(header).strip()
+        state = str(col[0]).strip()
         if not state:
             continue
         states.append(state)
@@ -180,81 +154,216 @@ def get_states_and_cities(token: str, sid: str):
     return states, state_to_cities
 
 # =========================
-# App flow
+# Wizard helpers
 # =========================
-# Acquire (or silently refresh) token once per session/rerun
-token = acquire_token()
+def set_step(n: int):
+    st.session_state["step"] = n
 
-# Create a workbook session for this run (closed on success/failure)
+def get_step() -> int:
+    return st.session_state.get("step", 1)
+
+def nav_buttons(back_to=None, next_to=None, next_label="Next"):
+    cols = st.columns([1, 1, 6, 2])
+    with cols[0]:
+        if back_to and st.button("← Back", use_container_width=True):
+            set_step(back_to); st.rerun()
+    with cols[-1]:
+        if next_to and st.button(next_label, use_container_width=True):
+            set_step(next_to); st.rerun()
+
+def write_step1_and_get_hdd_cdd(token, sid, state, city):
+    if state and city:
+        set_cell(token, sid, "C18", state)
+        set_cell(token, sid, "C19", city)
+        calculate(token, sid)
+        hdd = get_cell(token, sid, "C23")
+        cdd = get_cell(token, sid, "C24")
+        return hdd, cdd
+    return None, None
+
+def write_step2_and_get_wwr(token, sid, building_area, floors, hvac, existw, fuel, cool, hours, csw_sf):
+    ready = all([
+        building_area is not None and building_area > 0,
+        floors is not None and floors >= 0,
+        hvac, existw, fuel, cool,
+        hours is not None and hours > 0,
+        csw_sf is not None and csw_sf > 0
+    ])
+    if ready:
+        set_cell(token, sid, "F18", building_area)
+        set_cell(token, sid, "F19", floors)
+        set_cell(token, sid, "F20", hvac)     # <-- HVAC now included
+        set_cell(token, sid, "F24", existw)
+        set_cell(token, sid, "F21", fuel)
+        set_cell(token, sid, "F22", cool)
+        set_cell(token, sid, "F23", hours)
+        set_cell(token, sid, "F27", csw_sf)
+        calculate(token, sid)
+        wwr = get_cell(token, sid, "F28")
+        return wwr
+    return None
+
+def write_step3_inputs(token, sid, cswtyp, elec_rate, gas_rate):
+    if cswtyp:
+        set_cell(token, sid, "F26", cswtyp)
+    if elec_rate is not None:
+        set_cell(token, sid, "C27", elec_rate)
+    if gas_rate is not None:
+        set_cell(token, sid, "C28", gas_rate)
+    calculate(token, sid)
+
+def read_results(token, sid):
+    return {
+        "EUI Savings (E14)": get_cell(token, sid, "E14"),
+        "Electric Savings (F31)": get_cell(token, sid, "F31"),
+        "Gas Savings (F33)": get_cell(token, sid, "F33"),
+        "Electric Cost Savings (C35)": get_cell(token, sid, "C35"),
+        "Gas Cost Savings (C36)": get_cell(token, sid, "C36"),
+        "Total Savings (F36)": get_cell(token, sid, "F36"),
+    }
+
+# =========================
+# APP
+# =========================
+token = acquire_token()
 sid = create_session(token)
 
+# Global title for every step
+st.title("Winsert Savings Calculator")
+
+# Step indicator
+step = get_step()
+st.markdown(f"### Step {step} of 4")
+
 try:
-    # Pull State/City options dynamically
+    # Load state/city lists up front
     states_list, state_to_cities = get_states_and_cities(token, sid)
 
-    col1, col2 = st.columns(2)
+    # -----------------
+    # STEP 1: Location
+    # -----------------
+    if step == 1:
+        st.header("1) Select Location")
+        col1, col2 = st.columns(2)
 
-    # Reset city when state changes
-    def _on_state_change():
-        st.session_state.pop("city_sel", None)
+        def _on_state_change():
+            st.session_state.pop("city_sel", None)
 
-    state = col1.selectbox("State", states_list, key="state_sel", on_change=_on_state_change)
-    city = col2.selectbox("City", state_to_cities.get(state, []), key="city_sel")
+        state = col1.selectbox("State", states_list, key="state_sel", on_change=_on_state_change)
+        city = col2.selectbox("City", state_to_cities.get(state, []), key="city_sel")
 
-    # Other dropdowns (hardcoded here, can be wired to Lists later)
-    hvac = col1.selectbox("HVAC System Type", [
-        "Packaged VAV with electric reheat",
-        "Packaged VAV with hydronic reheat",
-        "Built-up VAV with hydronic reheat",
-        "Other",
-    ])
-    fuel = col2.selectbox("Heating Fuel", ["Electric", "Natural Gas", "None"])
-    cool = col1.selectbox("Cooling Installed?", ["Yes", "No"])
-    existw = col2.selectbox("Type of Existing Window", ["Single pane", "Double pane"])
-    cswtyp = col1.selectbox("Type of CSW Analyzed", ["Single", "Double"])
+        # Immediate gut check: HDD/CDD once both chosen
+        hdd, cdd = write_step1_and_get_hdd_cdd(token, sid, state, city)
+        st.divider()
+        st.subheader("Climate check")
+        if hdd is not None and cdd is not None:
+            cols = st.columns(2)
+            cols[0].metric("HDD (C23)", f"{hdd}")
+            cols[1].metric("CDD (C24)", f"{cdd}")
+            st.caption("If these look off for the chosen city, pick a different city/state.")
+        else:
+            st.info("Choose both State and City to see HDD/CDD.")
 
-    elec_rate = col2.number_input("Electric Rate ($/kWh)", min_value=0.0, step=0.01)
-    gas_rate  = col1.number_input("Natural Gas Rate ($/therm)", min_value=0.0, step=0.01)
-    bldg_area = col2.number_input("Building Area (ft²)", min_value=0.0, step=100.0)
-    floors    = col1.number_input("No. of Floors", min_value=0, step=1)
-    hours     = col2.number_input("Annual Operating Hours", min_value=0, step=100)
-    csw_sf    = col1.number_input("Sq.ft. of CSW Installed", min_value=0.0, step=50.0)
+        nav_buttons(back_to=None, next_to=2, next_label="Next →")
 
-    if st.button("Calculate"):
+    # -------------------------
+    # STEP 2: Building details
+    # -------------------------
+    elif step == 2:
+        st.header("2) Building Information")
+        col1, col2 = st.columns(2)
+
+        building_area = col1.number_input("Building Area (ft²)", min_value=0.0, step=100.0, key="bldg_area")
+        floors        = col2.number_input("No. of Floors", min_value=0, step=1, key="floors")
+
+        # HVAC System Type included here
+        hvac = col1.selectbox("HVAC System Type", [
+            "Packaged VAV with electric reheat",
+            "Packaged VAV with hydronic reheat",
+            "Built-up VAV with hydronic reheat",
+            "Other",
+        ], key="hvac")
+
+        existw = col2.selectbox("Type of Existing Window", ["Single pane", "Double pane"], key="existw")
+        fuel   = col1.selectbox("Heating Fuel", ["Electric", "Natural Gas", "None"], key="fuel")
+        cool   = col2.selectbox("Cooling Installed?", ["Yes", "No"], key="cool")
+        hours  = col1.number_input("Annual Operating Hours", min_value=0, step=100, key="hours")
+        csw_sf = col2.number_input("Sq.ft. of CSW Installed", min_value=0.0, step=50.0, key="csw_sf")
+
+        # Show WWR once all building info present
+        wwr = write_step2_and_get_wwr(token, sid, building_area, floors, hvac, existw, fuel, cool, hours, csw_sf)
+        st.divider()
+        st.subheader("Envelope check")
+        if wwr is not None:
+            st.metric("Estimated Window-to-Wall Ratio (F28)", f"{wwr}")
+            st.caption("If WWR seems off, adjust inputs before proceeding.")
+        else:
+            st.info("Enter all building details to estimate WWR.")
+
+        nav_buttons(back_to=1, next_to=3, next_label="Next →")
+
+    # ---------------------
+    # STEP 3: Rates & CSW
+    # ---------------------
+    elif step == 3:
+        st.header("3) Secondary Window & Rates")
+        col1, col2 = st.columns(2)
+
+        cswtyp    = col1.selectbox("Type of CSW Analyzed", ["Single", "Double"], key="cswtyp")
+        elec_rate = col2.number_input("Electric Rate ($/kWh)", min_value=0.0, step=0.01, key="elec_rate")
+        gas_rate  = col1.number_input("Natural Gas Rate ($/therm)", min_value=0.0, step=0.01, key="gas_rate")
+
+        # Write step 3 inputs on next to precompute results
+        cols = st.columns([1, 1, 6, 2])
+        with cols[0]:
+            if st.button("← Back", use_container_width=True):
+                set_step(2); st.rerun()
+        with cols[-1]:
+            if st.button("See Results →", use_container_width=True):
+                try:
+                    write_step3_inputs(token, sid, cswtyp, elec_rate, gas_rate)
+                except requests.HTTPError as e:
+                    st.error(f"HTTP {e.response.status_code}: {e.response.text[:400]}")
+                set_step(4); st.rerun()
+
+    # --------------
+    # STEP 4: Result
+    # --------------
+    elif step == 4:
+        st.header("4) Results")
         try:
-            # Write inputs
-            set_cell(token, sid, "C18", state)
-            set_cell(token, sid, "C19", city)
-            set_cell(token, sid, "F20", hvac)
-            set_cell(token, sid, "F21", fuel)
-            set_cell(token, sid, "F22", cool)
-            set_cell(token, sid, "F24", existw)
-            set_cell(token, sid, "F26", cswtyp)
-
-            set_cell(token, sid, "F18", bldg_area)
-            set_cell(token, sid, "F19", floors)
-            set_cell(token, sid, "F23", hours)
-            set_cell(token, sid, "F27", csw_sf)
-            set_cell(token, sid, "C27", elec_rate)
-            set_cell(token, sid, "C28", gas_rate)
-
-            # Recalculate and read outputs
             calculate(token, sid)
-            out = {
-                "Location HDD (C23)": get_cell(token, sid, "C23"),
-                "Location CDD (C24)": get_cell(token, sid, "C24"),
-                "Est. Window Wall Ratio (F28)": get_cell(token, sid, "F28"),
-                "Electric Savings (F31)": get_cell(token, sid, "F31"),
-                "Gas Savings (F33)": get_cell(token, sid, "F33"),
-                "EUI Savings (E14)": get_cell(token, sid, "E14"),
-                "Electric Cost Savings (C35)": get_cell(token, sid, "C35"),
-                "Gas Cost Savings (C36)": get_cell(token, sid, "C36"),
-                "Total Savings (F36)": get_cell(token, sid, "F36"),
-            }
-            st.subheader("Results")
-            for k, v in out.items():
-                st.write(f"**{k}**: {v}")
+            out = read_results(token, sid)
+            # Show nicely
+            st.subheader("Energy & Cost Savings")
+            grid = st.columns(2)
+            grid[0].metric("EUI Savings (E14)", f"{out['EUI Savings (E14)']}")
+            grid[1].metric("Window-to-Wall Ratio (F28)", f"{get_cell(token, sid, 'F28')}")
+            st.divider()
+            c1, c2 = st.columns(2)
+            with c1:
+                st.metric("Electric Savings (F31)", f"{out['Electric Savings (F31)']}")
+                st.metric("Gas Savings (F33)", f"{out['Gas Savings (F33)']}")
+            with c2:
+                st.metric("Electric Cost Savings (C35)", f"{out['Electric Cost Savings (C35)']}")
+                st.metric("Gas Cost Savings (C36)", f"{out['Gas Cost Savings (C36)']}")
+            st.subheader("Total")
+            st.metric("Total Savings (F36)", f"{out['Total Savings (F36)']}")
         except requests.HTTPError as e:
             st.error(f"HTTP {e.response.status_code}: {e.response.text[:400]}")
+
+        cols = st.columns([1, 1, 6, 2])
+        with cols[0]:
+            if st.button("← Back", use_container_width=True):
+                set_step(3); st.rerun()
+        with cols[-1]:
+            if st.button("Start Over", use_container_width=True):
+                # Clear step + keep token cache so you don't have to log in again
+                for k in list(st.session_state.keys()):
+                    if k not in ("msal_cache_serialized", "drive_item"):
+                        del st.session_state[k]
+                set_step(1); st.rerun()
+
 finally:
+    # Close workbook session to be tidy (values are persisted due to persistChanges=True)
     close_session(token, sid)
