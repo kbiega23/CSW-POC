@@ -51,6 +51,9 @@ st.markdown(
         background: #f7faff; border: 1px solid #e6efff; border-radius: 12px; padding: .65rem;
       }}
       hr {{ border-top: 1px solid #e6efff; }}
+      /* Compact, clean table */
+      table {{}}
+      thead th {{ white-space: nowrap; }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -252,6 +255,11 @@ def fmt_int(x):
     if v is None: return "—"
     return f"{round(v):,}"
 
+def fmt_rate4(x):
+    v = _to_float(x)
+    if v is None: return "—"
+    return f"${v:,.4f}"
+
 # =========================
 # Wizard helpers
 # =========================
@@ -353,6 +361,36 @@ def read_results(token, sid):
         "total_savings":get_cell(token, sid, "F36"),
         "wwr":          get_cell(token, sid, "F28"),
     }
+
+# NEW: read back the exact inputs from the workbook (robust summary)
+def read_input_summary_from_workbook(token, sid):
+    cells = [
+        ("State",                               "C18",  "text"),
+        ("City",                                "C19",  "text"),
+        ("Building Area (ft²)",                 "F18",  "int"),
+        ("Number of Floors",                    "F19",  "int"),
+        ("HVAC System Type",                    "F20",  "text"),
+        ("Existing Window Type",                "F24",  "text"),
+        ("Heating Fuel",                        "F21",  "text"),
+        ("Cooling Installed?",                  "F22",  "text"),
+        ("Annual Operating Hours (hrs/yr)",     "F23",  "int"),
+        ("CSW Installed (ft²)",                 "F27",  "int"),
+        ("Type of CSW Analyzed",                "F26",  "text"),
+        ("Electric Rate ($/kWh)",               "C27",  "rate"),
+        ("Natural Gas Rate ($/therm)",          "C28",  "rate"),
+    ]
+    rows = []
+    for label, addr, kind in cells:
+        v = get_cell(token, sid, addr)
+        if kind == "int":
+            vf = _to_float(v)
+            disp = "—" if vf is None else f"{int(round(vf)):,}"
+        elif kind == "rate":
+            disp = fmt_rate4(v)
+        else:
+            disp = "—" if v in (None, "") else str(v)
+        rows.append({"Input": label, "Value": disp})
+    return rows
 
 # =========================
 # APP
@@ -539,28 +577,11 @@ try:
 
             st.divider()
 
-            # Summary table of inputs
+            # Summary table — read back from workbook cells (no blanks)
             st.subheader("Your Inputs (Summary)")
-            inputs_summary = [
-                ("State", st.session_state.get("selected_state")),
-                ("City", st.session_state.get("city_sel")),
-                ("Building Area (ft²)", st.session_state.get("bldg_area")),
-                ("Number of Floors", st.session_state.get("floors")),
-                ("HVAC System Type", st.session_state.get("hvac")),
-                ("Existing Window Type", st.session_state.get("existw")),
-                ("Heating Fuel", st.session_state.get("fuel")),
-                ("Cooling Installed?", st.session_state.get("cool")),
-                ("Annual Operating Hours (hrs/yr)", st.session_state.get("hours")),
-                ("CSW Installed (ft²)", st.session_state.get("csw_sf")),
-                ("Type of CSW Analyzed", st.session_state.get("cswtyp")),
-                ("Electric Rate ($/kWh)", st.session_state.get("elec_rate")),
-                ("Natural Gas Rate ($/therm)", st.session_state.get("gas_rate")),
-            ]
-            def pretty(v):
-                if isinstance(v, float) and v.is_integer():
-                    return int(v)
-                return v
-            st.table({k: [pretty(v)] for k, v in inputs_summary})
+            summary_rows = read_input_summary_from_workbook(token, sid)
+            # Render as a tidy two-column table
+            st.table(summary_rows)
 
         except requests.HTTPError as e:
             st.error(f"HTTP {e.response.status_code}: {e.response.text[:400]}")
