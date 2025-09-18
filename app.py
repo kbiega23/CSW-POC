@@ -1,7 +1,7 @@
 # app.py — Winsert Savings Calculator (Office)
-# 5-step wizard with blue branding, token cache, Lists-driven State/City,
-# Step 1 & 2 as separate forms (State then City), Step 3 & 4 as forms,
-# Results page with updated headings/formatting.
+# Fast 5-step wizard with blue branding, token cache, cached State/City,
+# Forms for all steps, minimal Graph calls, and snappy navigation.
+
 import os
 import re
 import requests
@@ -121,7 +121,7 @@ def acquire_token() -> str:
     return res["access_token"]
 
 # =========================
-# Graph helpers
+# Graph helpers (with session reuse)
 # =========================
 def _item_base(token: str) -> str:
     if "drive_item" not in st.session_state:
@@ -132,13 +132,21 @@ def _item_base(token: str) -> str:
     return f"{GRAPH}/drives/{di['parentReference']['driveId']}/items/{di['id']}/workbook"
 
 def create_session(token: str) -> str:
+    sid = st.session_state.get("excel_session_id")
+    if sid:
+        return sid
     r = requests.post(_item_base(token) + "/createSession",
                       headers={"Authorization": f"Bearer {token}"},
-                      json={"persistChanges": True})  # current behavior: write back
+                      json={"persistChanges": True})
     r.raise_for_status()
-    return r.json()["id"]
+    sid = r.json()["id"]
+    st.session_state["excel_session_id"] = sid
+    return sid
 
-def close_session(token: str, sid: str):
+def close_session(token: str):
+    sid = st.session_state.pop("excel_session_id", None)
+    if not sid:
+        return
     try:
         requests.post(_item_base(token) + "/closeSession",
                       headers={"Authorization": f"Bearer {token}", "workbook-session-id": sid})
@@ -172,10 +180,12 @@ def calculate(token: str, sid: str):
     r.raise_for_status()
 
 # =========================
-# Lists sheet: States & Cities
+# Lists sheet: States & Cities (cached)
 # =========================
 def get_states_and_cities(token: str, sid: str):
-    """Reads Lists!C1:BA100 → row1 = states, rows below = cities."""
+    if "states_list" in st.session_state and "state_to_cities" in st.session_state:
+        return st.session_state["states_list"], st.session_state["state_to_cities"]
+
     rng = "Lists!C1:BA100"
     r = requests.get(
         _item_base(token) + f"/worksheets('Lists')/range(address='{rng}')",
@@ -183,9 +193,7 @@ def get_states_and_cities(token: str, sid: str):
     )
     r.raise_for_status()
     values = r.json().get("values", [])
-    if not values:
-        return [], {}
-    num_cols = len(values[0])
+    num_cols = len(values[0]) if values else 0
     state_to_cities, states = {}, []
     for c in range(num_cols):
         col = [row[c] if c < len(row) else None for row in values]
@@ -197,6 +205,9 @@ def get_states_and_cities(token: str, sid: str):
         states.append(state)
         cities = [str(v).strip() for v in col[1:] if v not in (None, "")]
         state_to_cities[state] = cities
+
+    st.session_state["states_list"] = states
+    st.session_state["state_to_cities"] = state_to_cities
     return states, state_to_cities
 
 # =========================
@@ -249,28 +260,30 @@ def set_step(n: int):
 def get_step() -> int:
     return st.session_state.get("step", 1)
 
-# Step 1: Apply state (persist in session & Excel)
+# Step 1: Apply state (no calc)
 def apply_state(token, sid, state):
     if state:
         set_cell(token, sid, "C18", state)
-        st.session_state["selected_state"] = state  # <<< persist chosen state
+        st.session_state["selected_state"] = state
         return True
     return False
 
-# Step 2: Apply city & show HDD/CDD
-def apply_city_and_get_hdd_cdd(token, sid, city):
-    if city:
-        set_cell(token, sid, "C19", city)
+# Step 2: Apply city; only calc when checking climate
+def apply_city(token, sid, city, do_calc=False):
+    if not city:
+        return False, None, None
+    set_cell(token, sid, "C19", city)
+    if do_calc:
         calculate(token, sid)
         hdd = get_cell(token, sid, "C23")
         cdd = get_cell(token, sid, "C24")
         st.session_state["hdd_latest"] = hdd
         st.session_state["cdd_latest"] = cdd
         return True, hdd, cdd
-    return False, None, None
+    return True, None, None
 
-# Step 3: Building info single-shot
-def apply_step3_building(token, sid):
+# Step 3: Building info; calc only when checking WWR
+def save_building_inputs(token, sid, calc_for_wwr=False):
     bldg_area = st.session_state.get("bldg_area")
     floors    = st.session_state.get("floors")
     hvac      = st.session_state.get("hvac")
@@ -299,19 +312,22 @@ def apply_step3_building(token, sid):
     set_cell(token, sid, "F23", hours)
     set_cell(token, sid, "F27", csw_sf)
 
-    calculate(token, sid)
-    wwr = get_cell(token, sid, "F28")
+    if calc_for_wwr:
+        calculate(token, sid)
+        wwr = get_cell(token, sid, "F28")
+        st.session_state["wwr_latest"] = wwr
+        st.session_state["step3_applied"] = True
+        return True, wwr
 
-    st.session_state["wwr_latest"] = wwr
+    # No calc path (faster)
     st.session_state["step3_applied"] = True
-    return True, wwr
+    return True, None
 
-# Step 4: Rates & CSW single-shot
-def apply_step4_rates(token, sid):
+# Step 4: Rates; no calc here (faster), results page will calc
+def save_rates(token, sid):
     cswtyp    = st.session_state.get("cswtyp")
     elec_rate = st.session_state.get("elec_rate")
     gas_rate  = st.session_state.get("gas_rate")
-
     ready = all([
         bool(cswtyp),
         (elec_rate is not None) and (elec_rate >= 0.0),
@@ -319,12 +335,9 @@ def apply_step4_rates(token, sid):
     ])
     if not ready:
         return False
-
     set_cell(token, sid, "F26", cswtyp)
     set_cell(token, sid, "C27", elec_rate)
     set_cell(token, sid, "C28", gas_rate)
-    calculate(token, sid)
-
     st.session_state["step4_applied"] = True
     return True
 
@@ -351,7 +364,7 @@ progress_bar(step, total=5)
 st.markdown(f"### Step {step} of 5")
 
 try:
-    # Load state/city lists up front
+    # Load state/city lists up front (cached)
     states_list, state_to_cities = get_states_and_cities(token, sid)
 
     # -----------------
@@ -360,41 +373,34 @@ try:
     if step == 1:
         st.header("1) Select State")
         with st.form("step1_state_form", clear_on_submit=False):
-            # default to previously chosen state if present
             default_state = st.session_state.get("selected_state")
             index = states_list.index(default_state) if default_state in states_list else 0
             state = st.selectbox("State", states_list, index=index, key="state_sel")
             cols = st.columns([1, 9])
             next1 = cols[-1].form_submit_button("Next →")
         if next1:
-            if not state:
-                st.warning("Please select a state to continue.")
+            if apply_state(token, sid, state):
+                set_step(2); st.rerun()
             else:
-                ok = apply_state(token, sid, state)
-                if not ok:
-                    st.warning("Please select a valid state.")
-                else:
-                    st.success("State applied.")
-                    set_step(2); st.rerun()
+                st.warning("Please select a state to continue.")
 
     # -----------------
-    # STEP 2: City (FORM) + Climate gut-check
+    # STEP 2: City (FORM) + Climate (only on 'Check Climate')
     # -----------------
     elif step == 2:
         st.header("2) Select City")
 
-        # Back button (outside form)
+        # Back
         cols_top = st.columns([1, 9])
         with cols_top[0]:
             if st.button("← Back", use_container_width=True):
                 set_step(1); st.rerun()
 
-        # Use the persisted state from step 1
         state = st.session_state.get("selected_state")
         if not state:
             st.info("Please select a State first.")
         else:
-            # If state changed since last time on this step, reset city selection
+            # Reset city if state changed
             if st.session_state.get("last_state_for_city") != state:
                 st.session_state.pop("city_sel", None)
                 st.session_state["last_state_for_city"] = state
@@ -402,37 +408,32 @@ try:
             city_options = state_to_cities.get(state, [])
             with st.form("step2_city_form", clear_on_submit=False):
                 st.selectbox("City", city_options, key="city_sel")
-                st.caption("Pick your city, then click **Check Climate** or **Next**.")
                 fcols = st.columns([1, 1, 6, 2])
                 check2 = fcols[0].form_submit_button("Check Climate")
                 next2  = fcols[-1].form_submit_button("Next →")
 
-            if check2 or next2:
+            if check2:
                 city = st.session_state.get("city_sel")
-                ok, hdd, cdd = apply_city_and_get_hdd_cdd(token, sid, city)
+                ok, hdd, cdd = apply_city(token, sid, city, do_calc=True)
                 if not ok:
                     st.warning("Please select a city to continue.")
-                    # Stay on step 2
-                    set_step(2); st.rerun()
                 else:
-                    st.success("Location applied.")
                     st.divider()
                     st.subheader("Climate check")
                     cols = st.columns(2)
                     cols[0].metric("Heating Degree Days", fmt_int(hdd))   # unitless
                     cols[1].metric("Cooling Degree Days", fmt_int(cdd))   # unitless
-                    if next2:
-                        set_step(3); st.rerun()
-                    else:
-                        # Explicitly stay on step 2 after Check Climate
-                        set_step(2); st.rerun()
-            elif st.session_state.get("hdd_latest") is not None and st.session_state.get("cdd_latest") is not None:
-                st.divider()
-                st.subheader("Climate check")
-                cols = st.columns(2)
-                cols[0].metric("Heating Degree Days", fmt_int(st.session_state["hdd_latest"]))
-                cols[1].metric("Cooling Degree Days", fmt_int(st.session_state["cdd_latest"]))
-                st.caption("If these look off, adjust the city and click Check Climate again.")
+                    # Stay on step 2 after climate check
+            elif next2:
+                city = st.session_state.get("city_sel")
+                ok, _, _ = apply_city(token, sid, city, do_calc=False)  # no calc here (faster)
+                if ok:
+                    set_step(3); st.rerun()
+                else:
+                    st.warning("Please select a city to continue.")
+            else:
+                # If they haven't requested climate check, do not show HDD/CDD here
+                pass
 
     # -------------------------
     # STEP 3: Building details (FORM) — "Check WWR"
@@ -462,28 +463,25 @@ try:
             col1.number_input("Annual Operating Hours (hrs/yr)", min_value=0, step=100, key="hours")
             col2.number_input("CSW Installed (ft²)",             min_value=0.0, step=50.0, key="csw_sf")
 
-            st.caption("Fill all fields, then click **Check WWR** once.")
             fcols = st.columns([1, 1, 6, 2])
             check3 = fcols[0].form_submit_button("Check WWR")
             next3  = fcols[-1].form_submit_button("Next →")
 
-        if check3 or next3:
-            ok, wwr = apply_step3_building(token, sid)
+        if check3:
+            ok, wwr = save_building_inputs(token, sid, calc_for_wwr=True)
             if not ok:
-                st.warning("Please complete all building fields before proceeding.")
-                set_step(3); st.rerun()
+                st.warning("Please complete all building fields.")
             else:
-                st.success("Building info applied.")
+                st.divider()
+                st.subheader("Envelope check")
                 st.metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
-                if next3:
-                    set_step(4); st.rerun()
-                else:
-                    set_step(3); st.rerun()
-        elif st.session_state.get("step3_applied") and st.session_state.get("wwr_latest") is not None:
-            st.divider()
-            st.subheader("Envelope check")
-            st.metric("Window-to-Wall Ratio", fmt_pct_one_decimal(st.session_state["wwr_latest"]))
-            st.caption("If WWR seems off, adjust inputs and click Check WWR again.")
+                # Stay on step 3 after check
+        elif next3:
+            ok, _ = save_building_inputs(token, sid, calc_for_wwr=False)  # no calc (faster)
+            if ok:
+                set_step(4); st.rerun()
+            else:
+                st.warning("Please complete all building fields.")
 
     # ---------------------
     # STEP 4: Rates & CSW (FORM) — only "See Results →"
@@ -502,18 +500,14 @@ try:
             col1.selectbox("Type of CSW Analyzed", ["Single", "Double"], key="cswtyp")
             col2.number_input("Electric Rate ($/kWh)", min_value=0.0, step=0.01, key="elec_rate")
             col1.number_input("Natural Gas Rate ($/therm)", min_value=0.0, step=0.01, key="gas_rate")
-            st.caption("Enter all values, then click **See Results →** once.")
             fcols = st.columns([1, 1, 6, 2])
             next4  = fcols[-1].form_submit_button("See Results →")
 
         if next4:
-            ok = apply_step4_rates(token, sid)
-            if not ok:
-                st.warning("Please complete the CSW type and both rates before proceeding.")
-                set_step(4); st.rerun()
-            else:
-                st.success("Rates applied.")
+            if save_rates(token, sid):
                 set_step(5); st.rerun()
+            else:
+                st.warning("Please complete the CSW type and both rates.")
 
     # --------------
     # STEP 5: Results
@@ -521,7 +515,7 @@ try:
     elif step == 5:
         st.header("5) Results")
         try:
-            calculate(token, sid)
+            calculate(token, sid)  # single calc here to include all prior inputs
             res = read_results(token, sid)
 
             # Group 1: Energy savings (EUI %, Electric kWh, Gas therms)
@@ -554,12 +548,14 @@ try:
                 set_step(4); st.rerun()
         with cols[-1]:
             if st.button("Start Over", use_container_width=True):
-                # Keep login & drive item, clear the rest
+                # Close Excel session and reset UI (keeps login & drive item)
+                close_session(token)
+                keep = {"msal_cache_serialized", "drive_item"}
                 for k in list(st.session_state.keys()):
-                    if k not in ("msal_cache_serialized", "drive_item"):
+                    if k not in keep:
                         del st.session_state[k]
                 set_step(1); st.rerun()
 
 finally:
-    # Current behavior: close workbook session each run (changes persist)
-    close_session(token, sid)
+    # Keep the Excel session open across reruns for speed (do NOT close here)
+    pass
