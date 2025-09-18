@@ -3,6 +3,7 @@
 # - Step 1 & 2 non-form (fast), Step 3–4 form-in-container (empty() before rerun)
 # - Inline climate/WWR metrics
 # - "Winsert Lite/Plus" UI mapped to "Single/Double" in Excel
+# - Validation: Building Area (15k–500k), Hours (1,980–8,760), WWR caution if <10% or >50%
 # - Blue theme, token cache, Graph Excel session reuse
 # - Results summary reads actual workbook cells (incl. WWR under Hours)
 
@@ -291,7 +292,7 @@ def check_climate(token, sid, city):
     cdd = get_cell(token, sid, "C24")
     return hdd, cdd
 
-# Step 3: Building inputs; optionally calc WWR
+# Step 3: Building inputs with validation; optionally calc WWR
 def save_building_inputs(token, sid, calc_for_wwr=False):
     bldg_area = st.session_state.get("bldg_area")
     floors    = st.session_state.get("floors")
@@ -302,16 +303,27 @@ def save_building_inputs(token, sid, calc_for_wwr=False):
     hours     = st.session_state.get("hours")
     csw_sf    = st.session_state.get("csw_sf")
 
-    ready = all([
-        isinstance(bldg_area, (int, float)) and bldg_area > 0,
-        isinstance(floors, (int, float)) and floors >= 0,
+    # Presence & basic sanity
+    present_ok = all([
+        isinstance(bldg_area, (int, float)),
+        isinstance(floors, (int, float)),
         hvac, existw, fuel, cool,
-        isinstance(hours, (int, float)) and hours > 0,
-        isinstance(csw_sf, (int, float)) and csw_sf > 0,
+        isinstance(hours, (int, float)),
+        isinstance(csw_sf, (int, float)),
     ])
-    if not ready:
-        return False, None
+    if not present_ok:
+        return False, None, "Please complete all building fields."
 
+    # Range validation
+    if not (15000 <= bldg_area <= 500000):
+        return False, None, "Building Area must be between 15,000 and 500,000 ft². Please re-enter a value within the allowable range."
+    if bldg_area <= 0 or csw_sf <= 0 or hours <= 0 or floors < 0:
+        return False, None, "Please enter positive values for the numeric fields."
+
+    if not (1980 <= hours <= 8760):
+        return False, None, "Annual Operating Hours must be between 1,980 and 8,760. Please re-enter a value within the allowable range."
+
+    # Write inputs
     set_cell(token, sid, "F18", bldg_area)
     set_cell(token, sid, "F19", floors)
     set_cell(token, sid, "F20", hvac)
@@ -326,10 +338,10 @@ def save_building_inputs(token, sid, calc_for_wwr=False):
         wwr = get_cell(token, sid, "F28")
         st.session_state["wwr_latest"] = wwr
         st.session_state["wwr_checked"] = True
-        return True, wwr
+        return True, wwr, None
 
     st.session_state["wwr_checked"] = False
-    return True, None
+    return True, None, None
 
 # Ensure we commit a deferred city (if user skipped “Check Climate”)
 def ensure_city_committed(token, sid):
@@ -496,7 +508,7 @@ try:
                     box2.empty(); set_step(3); st.rerun()
 
     # -------------------------
-    # STEP 3: Building details (FORM in a container) — inline WWR
+    # STEP 3: Building details (FORM in a container) — inline WWR with validation
     # -------------------------
     elif step == 3:
         st.header("3) Building Information")
@@ -511,6 +523,7 @@ try:
                     box3.empty(); set_step(2); st.rerun()
 
             col1, col2 = st.columns(2)
+            # Keep basic non-negative guard; range validation happens on submit
             col1.number_input("Building Area (ft²)", min_value=0.0, step=100.0, key="bldg_area")
             col2.number_input("Number of Floors",   min_value=0,   step=1,      key="floors")
             col1.selectbox("HVAC System Type", [
@@ -529,21 +542,32 @@ try:
             check3 = row[0].form_submit_button("Check WWR")
             next3  = row[-1].form_submit_button("Next →")
 
+        def _wwr_fraction(val):
+            v = _to_float(val)
+            if v is None: 
+                return None
+            return v if v <= 1.0 else v / 100.0
+
         if step == 3:
             if check3:
-                ok, wwr = save_building_inputs(token, sid, calc_for_wwr=True)
+                ok, wwr, err = save_building_inputs(token, sid, calc_for_wwr=True)
                 if not ok:
-                    st.warning("Please complete all building fields.")
+                    st.error(err)
                 else:
                     with metrics3.container():
-                        row2 = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
+                        row2 = st.columns([2.2, 2.2, 3.6, 2.0])
                         row2[1].metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
+                    # Caution if WWR outside 10%–50%
+                    wwr_frac = _wwr_fraction(wwr)
+                    if wwr_frac is not None and (wwr_frac < 0.10 or wwr_frac > 0.50):
+                        st.warning("WWR seems abnormal. Please confirm before proceeding.")
+                    # remain on step 3
             elif next3:
-                ok, _ = save_building_inputs(token, sid, calc_for_wwr=False)
+                ok, _, err = save_building_inputs(token, sid, calc_for_wwr=False)
                 if ok:
                     box3.empty(); set_step(4); st.rerun()
                 else:
-                    st.warning("Please complete all building fields.")
+                    st.error(err)
 
     # ---------------------
     # STEP 4: Rates & CSW (FORM in a container) — flicker-free jump to results
