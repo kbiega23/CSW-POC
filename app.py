@@ -2,7 +2,6 @@
 # 5-step wizard with blue branding, token cache, Lists-driven State/City,
 # Step 1 & 2 as separate forms (State then City), Step 3 & 4 as forms,
 # Results page with updated headings/formatting.
-
 import os
 import re
 import requests
@@ -250,10 +249,11 @@ def set_step(n: int):
 def get_step() -> int:
     return st.session_state.get("step", 1)
 
-# Step 1: Apply state only (no calc)
+# Step 1: Apply state (persist in session & Excel)
 def apply_state(token, sid, state):
     if state:
         set_cell(token, sid, "C18", state)
+        st.session_state["selected_state"] = state  # <<< persist chosen state
         return True
     return False
 
@@ -359,12 +359,13 @@ try:
     # -----------------
     if step == 1:
         st.header("1) Select State")
-
         with st.form("step1_state_form", clear_on_submit=False):
-            state = st.selectbox("State", states_list, key="state_sel")
+            # default to previously chosen state if present
+            default_state = st.session_state.get("selected_state")
+            index = states_list.index(default_state) if default_state in states_list else 0
+            state = st.selectbox("State", states_list, index=index, key="state_sel")
             cols = st.columns([1, 9])
             next1 = cols[-1].form_submit_button("Next →")
-
         if next1:
             if not state:
                 st.warning("Please select a state to continue.")
@@ -388,11 +389,16 @@ try:
             if st.button("← Back", use_container_width=True):
                 set_step(1); st.rerun()
 
-        # Need a state first
-        state = st.session_state.get("state_sel")
+        # Use the persisted state from step 1
+        state = st.session_state.get("selected_state")
         if not state:
             st.info("Please select a State first.")
         else:
+            # If state changed since last time on this step, reset city selection
+            if st.session_state.get("last_state_for_city") != state:
+                st.session_state.pop("city_sel", None)
+                st.session_state["last_state_for_city"] = state
+
             city_options = state_to_cities.get(state, [])
             with st.form("step2_city_form", clear_on_submit=False):
                 st.selectbox("City", city_options, key="city_sel")
@@ -406,6 +412,8 @@ try:
                 ok, hdd, cdd = apply_city_and_get_hdd_cdd(token, sid, city)
                 if not ok:
                     st.warning("Please select a city to continue.")
+                    # Stay on step 2
+                    set_step(2); st.rerun()
                 else:
                     st.success("Location applied.")
                     st.divider()
@@ -415,6 +423,9 @@ try:
                     cols[1].metric("Cooling Degree Days", fmt_int(cdd))   # unitless
                     if next2:
                         set_step(3); st.rerun()
+                    else:
+                        # Explicitly stay on step 2 after Check Climate
+                        set_step(2); st.rerun()
             elif st.session_state.get("hdd_latest") is not None and st.session_state.get("cdd_latest") is not None:
                 st.divider()
                 st.subheader("Climate check")
@@ -437,17 +448,14 @@ try:
 
         with st.form("step3_building_form", clear_on_submit=False):
             col1, col2 = st.columns(2)
-
             col1.number_input("Building Area (ft²)", min_value=0.0, step=100.0, key="bldg_area")
             col2.number_input("Number of Floors",   min_value=0,   step=1,      key="floors")
-
             col1.selectbox("HVAC System Type", [
                 "Packaged VAV with electric reheat",
                 "Packaged VAV with hydronic reheat",
                 "Built-up VAV with hydronic reheat",
                 "Other",
             ], key="hvac")
-
             col2.selectbox("Existing Window Type", ["Single pane", "Double pane"], key="existw")
             col1.selectbox("Heating Fuel", ["Electric", "Natural Gas", "None"],    key="fuel")
             col2.selectbox("Cooling Installed?", ["Yes", "No"],                    key="cool")
@@ -463,11 +471,14 @@ try:
             ok, wwr = apply_step3_building(token, sid)
             if not ok:
                 st.warning("Please complete all building fields before proceeding.")
+                set_step(3); st.rerun()
             else:
                 st.success("Building info applied.")
                 st.metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
                 if next3:
                     set_step(4); st.rerun()
+                else:
+                    set_step(3); st.rerun()
         elif st.session_state.get("step3_applied") and st.session_state.get("wwr_latest") is not None:
             st.divider()
             st.subheader("Envelope check")
@@ -491,16 +502,15 @@ try:
             col1.selectbox("Type of CSW Analyzed", ["Single", "Double"], key="cswtyp")
             col2.number_input("Electric Rate ($/kWh)", min_value=0.0, step=0.01, key="elec_rate")
             col1.number_input("Natural Gas Rate ($/therm)", min_value=0.0, step=0.01, key="gas_rate")
-
             st.caption("Enter all values, then click **See Results →** once.")
             fcols = st.columns([1, 1, 6, 2])
-            # No "Apply Rates" button per your request
             next4  = fcols[-1].form_submit_button("See Results →")
 
         if next4:
             ok = apply_step4_rates(token, sid)
             if not ok:
                 st.warning("Please complete the CSW type and both rates before proceeding.")
+                set_step(4); st.rerun()
             else:
                 st.success("Rates applied.")
                 set_step(5); st.rerun()
