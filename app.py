@@ -3,9 +3,7 @@
 # - Step 1 & 2 non-form (fast), Step 3–4 form-in-container (empty() before rerun)
 # - Inline climate/WWR metrics
 # - "Winsert Lite/Plus" UI mapped to "Single/Double" in Excel
-# - Validation: Building Area (15k–500k), Hours (1,980–8,760), Floors (1–100)
-# - Incompatibility block: Fuel = Natural Gas + HVAC = Packaged VAV with electric reheat
-# - WWR caution if <10% or >50% (warning only, placed inline next to metric)
+# - Validation: Building Area (15k–500k), Hours (1,980–8,760), WWR caution if <10% or >50%
 # - Blue theme, token cache, Graph Excel session reuse
 # - Results summary reads actual workbook cells (incl. WWR under Hours)
 
@@ -319,16 +317,11 @@ def save_building_inputs(token, sid, calc_for_wwr=False):
     # Range validation
     if not (15000 <= bldg_area <= 500000):
         return False, None, "Building Area must be between 15,000 and 500,000 ft². Please re-enter a value within the allowable range."
-    if not (1 <= floors <= 100):
-        return False, None, "Number of Floors must be between 1 and 100. Please revise before proceeding."
+    if bldg_area <= 0 or csw_sf <= 0 or hours <= 0 or floors < 0:
+        return False, None, "Please enter positive values for the numeric fields."
+
     if not (1980 <= hours <= 8760):
         return False, None, "Annual Operating Hours must be between 1,980 and 8,760. Please re-enter a value within the allowable range."
-    if csw_sf <= 0:
-        return False, None, "CSW Installed must be greater than 0 ft²."
-
-    # Incompatibility: Natural Gas + Packaged VAV with electric reheat
-    if (str(fuel).strip() == "Natural Gas") and (str(hvac).strip() == "Packaged VAV with electric reheat"):
-        return False, None, "Selected Heating Fuel (Natural Gas) is not compatible with HVAC System Type (Packaged VAV with electric reheat). Please change either Heating Fuel or HVAC System Type."
 
     # Write inputs
     set_cell(token, sid, "F18", bldg_area)
@@ -407,7 +400,7 @@ def read_input_summary_from_workbook(token, sid):
         ("Annual Operating Hours (hrs/yr)",     "F23",  "int"),
         ("Window-to-Wall Ratio",                "F28",  "pct1"),
         ("CSW Installed (ft²)",                 "F27",  "int"),
-        ("Type of CSW Analyzed",                "F26",  "csw"),
+        ("Type of CSW Analyzed",                "F26",  "csw"),  # show product names
         ("Electric Rate ($/kWh)",               "C27",  "rate"),
         ("Natural Gas Rate ($/therm)",          "C28",  "rate"),
     ]
@@ -530,11 +523,9 @@ try:
                     box3.empty(); set_step(2); st.rerun()
 
             col1, col2 = st.columns(2)
-            # Hints under inputs; floors constrained in UI to 1–100
-            col1.number_input("Building Area (ft²)", min_value=0.0, step=100.0,
-                              key="bldg_area", help="Allowed range: 15,000–500,000 ft²")
-            col2.number_input("Number of Floors", min_value=1, max_value=100, step=1,
-                              key="floors", help="Allowed range: 1–100 floors")
+            # Keep basic non-negative guard; range validation happens on submit
+            col1.number_input("Building Area (ft²)", min_value=0.0, step=100.0, key="bldg_area")
+            col2.number_input("Number of Floors",   min_value=0,   step=1,      key="floors")
             col1.selectbox("HVAC System Type", [
                 "Packaged VAV with electric reheat",
                 "Packaged VAV with hydronic reheat",
@@ -544,23 +535,16 @@ try:
             col2.selectbox("Existing Window Type", ["Single pane", "Double pane"], key="existw")
             col1.selectbox("Heating Fuel", ["Electric", "Natural Gas", "None"],    key="fuel")
             col2.selectbox("Cooling Installed?", ["Yes", "No"],                    key="cool")
-            # ⬇️ Added hours hint here
-            col1.number_input("Annual Operating Hours (hrs/yr)", min_value=0, step=100, key="hours",
-                              help="Allowed range: 1,980–8,760 hrs/yr")
+            col1.number_input("Annual Operating Hours (hrs/yr)", min_value=0, step=100, key="hours")
             col2.number_input("CSW Installed (ft²)",             min_value=0.0, step=50.0, key="csw_sf")
 
-            # Button row with inline "typical values" note beside Check WWR
-            row = st.columns([2.2, 3.6, 2.2, 2.6, 2.0])
+            row = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
             check3 = row[0].form_submit_button("Check WWR")
-            row[1].markdown(
-                "<div style='margin-top:8px; color:#0d47a1;'>Typical values: 10%–50%</div>",
-                unsafe_allow_html=True
-            )
             next3  = row[-1].form_submit_button("Next →")
 
         def _wwr_fraction(val):
             v = _to_float(val)
-            if v is None:
+            if v is None: 
                 return None
             return v if v <= 1.0 else v / 100.0
 
@@ -571,21 +555,12 @@ try:
                     st.error(err)
                 else:
                     with metrics3.container():
-                        # Metric + inline warning in same row
-                        row2 = st.columns([3.4, 6.6])
-                        row2[0].metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
-                        # Caution if WWR outside 10%–50% (inline, right next to metric)
-                        wwr_frac = _wwr_fraction(wwr)
-                        if wwr_frac is not None and (wwr_frac < 0.10 or wwr_frac > 0.50):
-                            row2[1].markdown(
-                                "<div style='margin-top:8px; padding:8px 12px; background:#FFF7ED; "
-                                "border:1px solid #F59E0B; color:#7C2D12; border-radius:8px;'>"
-                                "⚠️ <b>WWR seems abnormal.</b> Please confirm before proceeding."
-                                "</div>",
-                                unsafe_allow_html=True
-                            )
-                        else:
-                            row2[1].markdown("&nbsp;", unsafe_allow_html=True)
+                        row2 = st.columns([2.2, 2.2, 3.6, 2.0])
+                        row2[1].metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
+                    # Caution if WWR outside 10%–50%
+                    wwr_frac = _wwr_fraction(wwr)
+                    if wwr_frac is not None and (wwr_frac < 0.10 or wwr_frac > 0.50):
+                        st.warning("WWR seems abnormal. Please confirm before proceeding.")
                     # remain on step 3
             elif next3:
                 ok, _, err = save_building_inputs(token, sid, calc_for_wwr=False)
