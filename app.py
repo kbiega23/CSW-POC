@@ -1,11 +1,13 @@
 # app.py — Winsert Savings Calculator (Office)
 # Flicker-free wizard with:
 # - Step 1 & 2 non-form (fast), Step 3–4 form-in-container (empty() before rerun)
-# - Inline climate/WWR metrics
+# - Inline climate (HDD/CDD) and WWR metrics (with inline warning)
 # - "Winsert Lite/Plus" UI mapped to "Single/Double" in Excel
-# - Validation: Building Area (15k–500k), Hours (1,980–8,760), WWR caution if <10% or >50%
+# - Validation: Building Area (15k–500k), Hours (1,980–8,760), Floors (1–100)
+# - Incompatibility block: Fuel = Natural Gas + HVAC = Packaged VAV with electric reheat
+# - Hours/Area/Floors hints; WWR typical values hint
 # - Blue theme, token cache, Graph Excel session reuse
-# - Results summary reads actual workbook cells (incl. WWR under Hours)
+# - Results summary reads actual workbook cells
 
 import os
 import re
@@ -187,19 +189,56 @@ def calculate(token: str, sid: str):
     r.raise_for_status()
 
 # =========================
-# Lists sheet: States & Cities (cached)
+# Lists sheet: States & Cities (fixed range + fallback)
 # =========================
 def get_states_and_cities(token: str, sid: str):
+    """
+    Reads the Lists sheet where columns C:BA have STATE in row 1 and cities beneath.
+    Returns (states_list, state_to_cities).
+    Uses a sheet-relative address to avoid double-sheet addressing errors.
+    Falls back to usedRange() if the direct range fails.
+    """
     if "states_list" in st.session_state and "state_to_cities" in st.session_state:
         return st.session_state["states_list"], st.session_state["state_to_cities"]
 
-    rng = "Lists!C1:BA100"
-    r = requests.get(
-        _item_base(token) + f"/worksheets('Lists')/range(address='{rng}')",
-        headers={"Authorization": f"Bearer {token}", "workbook-session-id": sid},
-    )
-    r.raise_for_status()
-    values = r.json().get("values", [])
+    headers = {"Authorization": f"Bearer {token}", "workbook-session-id": sid}
+
+    # Primary: sheet-relative address (we already specify worksheets('Lists'))
+    addr = "C1:BA200"  # allow headroom
+    url  = _item_base(token) + f"/worksheets('Lists')/range(address='{addr}')"
+
+    values = None
+    try:
+        r = requests.get(url, headers=headers)
+        r.raise_for_status()
+        values = r.json().get("values", [])
+    except requests.HTTPError as e:
+        # Fallback: usedRange + slice C..BA locally
+        try:
+            ur_url = _item_base(token) + "/worksheets('Lists')/usedRange(valuesOnly=true)"
+            ur = requests.get(ur_url, headers=headers)
+            ur.raise_for_status()
+            used = ur.json().get("values", [])
+            if used:
+                maxw = max(len(row) for row in used)
+                norm = [row + [None]*(maxw - len(row)) for row in used]
+                start_c, end_c = 2, 53  # C..BA inclusive (0-based)
+                values = [row[start_c:end_c+1] for row in norm]
+            else:
+                values = []
+        except Exception:
+            st.error("Unable to read State/City lists from the workbook. "
+                     "Verify sheet **Lists** exists and columns **C:BA** contain the State headers with cities below.")
+            try:
+                st.caption(f"Graph error: HTTP {e.response.status_code} — {e.response.text[:300]}")
+            except Exception:
+                pass
+            st.stop()
+
+    if not values:
+        st.error("The Lists sheet returned no data. Confirm that States are in row 1 of columns C–BA with cities below.")
+        st.stop()
+
     num_cols = len(values[0]) if values else 0
     state_to_cities, states = {}, []
     for c in range(num_cols):
@@ -209,8 +248,8 @@ def get_states_and_cities(token: str, sid: str):
         state = str(col[0]).strip()
         if not state:
             continue
-        states.append(state)
         cities = [str(v).strip() for v in col[1:] if v not in (None, "")]
+        states.append(state)
         state_to_cities[state] = cities
 
     st.session_state["states_list"] = states
@@ -285,7 +324,6 @@ def write_city_to_workbook(token, sid, city):
     set_cell(token, sid, "C19", city)
 
 def check_climate(token, sid, city):
-    # Write city (for climate calc), then compute HDD/CDD
     write_city_to_workbook(token, sid, city)
     calculate(token, sid)
     hdd = get_cell(token, sid, "C23")
@@ -303,7 +341,6 @@ def save_building_inputs(token, sid, calc_for_wwr=False):
     hours     = st.session_state.get("hours")
     csw_sf    = st.session_state.get("csw_sf")
 
-    # Presence & basic sanity
     present_ok = all([
         isinstance(bldg_area, (int, float)),
         isinstance(floors, (int, float)),
@@ -314,16 +351,18 @@ def save_building_inputs(token, sid, calc_for_wwr=False):
     if not present_ok:
         return False, None, "Please complete all building fields."
 
-    # Range validation
     if not (15000 <= bldg_area <= 500000):
         return False, None, "Building Area must be between 15,000 and 500,000 ft². Please re-enter a value within the allowable range."
-    if bldg_area <= 0 or csw_sf <= 0 or hours <= 0 or floors < 0:
-        return False, None, "Please enter positive values for the numeric fields."
-
+    if not (1 <= floors <= 100):
+        return False, None, "Number of Floors must be between 1 and 100. Please revise before proceeding."
     if not (1980 <= hours <= 8760):
         return False, None, "Annual Operating Hours must be between 1,980 and 8,760. Please re-enter a value within the allowable range."
+    if csw_sf <= 0:
+        return False, None, "CSW Installed must be greater than 0 ft²."
 
-    # Write inputs
+    if (str(fuel).strip() == "Natural Gas") and (str(hvac).strip() == "Packaged VAV with electric reheat"):
+        return False, None, "Selected Heating Fuel (Natural Gas) is not compatible with HVAC System Type (Packaged VAV with electric reheat). Please change either Heating Fuel or HVAC System Type."
+
     set_cell(token, sid, "F18", bldg_area)
     set_cell(token, sid, "F19", floors)
     set_cell(token, sid, "F20", hvac)
@@ -343,7 +382,6 @@ def save_building_inputs(token, sid, calc_for_wwr=False):
     st.session_state["wwr_checked"] = False
     return True, None, None
 
-# Ensure we commit a deferred city (if user skipped “Check Climate”)
 def ensure_city_committed(token, sid):
     pending = st.session_state.get("pending_city")
     if pending:
@@ -356,7 +394,6 @@ def save_rates(token, sid):
     elec_rate = st.session_state.get("elec_rate")
     gas_rate  = st.session_state.get("gas_rate")
 
-    # Map UI label -> Excel value
     product_map = {"Winsert Lite": "Single", "Winsert Plus": "Double"}
     excel_value = product_map.get(product)
 
@@ -369,7 +406,7 @@ def save_rates(token, sid):
         return False
 
     ensure_city_committed(token, sid)
-    set_cell(token, sid, "F26", excel_value)  # write "Single" or "Double" to Excel
+    set_cell(token, sid, "F26", excel_value)
     set_cell(token, sid, "C27", elec_rate)
     set_cell(token, sid, "C28", gas_rate)
     st.session_state["step4_applied"] = True
@@ -386,7 +423,6 @@ def read_results(token, sid):
         "wwr":          get_cell(token, sid, "F28"),
     }
 
-# Robust input summary direct from workbook (includes WWR under Hours)
 def read_input_summary_from_workbook(token, sid):
     cells = [
         ("State",                               "C18",  "text"),
@@ -400,7 +436,7 @@ def read_input_summary_from_workbook(token, sid):
         ("Annual Operating Hours (hrs/yr)",     "F23",  "int"),
         ("Window-to-Wall Ratio",                "F28",  "pct1"),
         ("CSW Installed (ft²)",                 "F27",  "int"),
-        ("Type of CSW Analyzed",                "F26",  "csw"),  # show product names
+        ("Type of CSW Analyzed",                "F26",  "csw"),
         ("Electric Rate ($/kWh)",               "C27",  "rate"),
         ("Natural Gas Rate ($/therm)",          "C28",  "rate"),
     ]
@@ -440,7 +476,7 @@ try:
     states_list, state_to_cities = get_states_and_cities(token, sid)
 
     # -----------------
-    # STEP 1: State (non-form for snappy nav)
+    # STEP 1: State
     # -----------------
     if step == 1:
         st.header("1) Select State")
@@ -455,13 +491,13 @@ try:
                 st.warning("Please select a state to continue.")
 
     # -----------------
-    # STEP 2: City (non-form inside container) — no Graph call on Next
+    # STEP 2: City
     # -----------------
     elif step == 2:
         st.header("2) Select City")
 
         box2 = st.container()
-        metrics2 = st.empty()  # placeholder for inline HDD/CDD
+        metrics2 = st.empty()  # inline HDD/CDD
 
         with box2:
             cols_top = st.columns([1, 9])
@@ -473,7 +509,6 @@ try:
             if not state:
                 st.info("Please select a State first.")
             else:
-                # Reset city when state changes
                 if st.session_state.get("last_state_for_city") != state:
                     st.session_state.pop("city_sel", None)
                     st.session_state["last_state_for_city"] = state
@@ -485,7 +520,6 @@ try:
                 check2 = row[0].button("Check Climate")
                 next2  = row[-1].button("Next →")
 
-        # Actions (outside box for instant clearing/navigation)
         if step == 2:
             if check2:
                 city = st.session_state.get("city_sel")
@@ -497,18 +531,16 @@ try:
                         row2 = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
                         row2[1].metric("Heating Degree Days", fmt_int(hdd))
                         row2[2].metric("Cooling Degree Days", fmt_int(cdd))
-                    # stay on step 2
             elif next2:
                 city = st.session_state.get("city_sel")
                 if not city:
                     st.warning("Please select a city to continue.")
                 else:
-                    # Defer writing city to Excel for speed; commit at Step 4
-                    st.session_state["pending_city"] = city
+                    st.session_state["pending_city"] = city  # commit at Step 4
                     box2.empty(); set_step(3); st.rerun()
 
     # -------------------------
-    # STEP 3: Building details (FORM in a container) — inline WWR with validation
+    # STEP 3: Building details
     # -------------------------
     elif step == 3:
         st.header("3) Building Information")
@@ -523,9 +555,10 @@ try:
                     box3.empty(); set_step(2); st.rerun()
 
             col1, col2 = st.columns(2)
-            # Keep basic non-negative guard; range validation happens on submit
-            col1.number_input("Building Area (ft²)", min_value=0.0, step=100.0, key="bldg_area")
-            col2.number_input("Number of Floors",   min_value=0,   step=1,      key="floors")
+            col1.number_input("Building Area (ft²)", min_value=0.0, step=100.0,
+                              key="bldg_area", help="Allowed range: 15,000–500,000 ft²")
+            col2.number_input("Number of Floors", min_value=1, max_value=100, step=1,
+                              key="floors", help="Allowed range: 1–100 floors")
             col1.selectbox("HVAC System Type", [
                 "Packaged VAV with electric reheat",
                 "Packaged VAV with hydronic reheat",
@@ -533,18 +566,23 @@ try:
                 "Other",
             ], key="hvac")
             col2.selectbox("Existing Window Type", ["Single pane", "Double pane"], key="existw")
-            col1.selectbox("Heating Fuel", ["Electric", "Natural Gas", "None"],    key="fuel")
-            col2.selectbox("Cooling Installed?", ["Yes", "No"],                    key="cool")
-            col1.number_input("Annual Operating Hours (hrs/yr)", min_value=0, step=100, key="hours")
-            col2.number_input("CSW Installed (ft²)",             min_value=0.0, step=50.0, key="csw_sf")
+            col1.selectbox("Heating Fuel", ["Electric", "Natural Gas", "None"], key="fuel")
+            col2.selectbox("Cooling Installed?", ["Yes", "No"], key="cool")
+            col1.number_input("Annual Operating Hours (hrs/yr)", min_value=0, step=100, key="hours",
+                              help="Allowed range: 1,980–8,760 hrs/yr")
+            col2.number_input("CSW Installed (ft²)", min_value=0.0, step=50.0, key="csw_sf")
 
-            row = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
+            row = st.columns([2.2, 3.6, 2.2, 2.6, 2.0])
             check3 = row[0].form_submit_button("Check WWR")
+            row[1].markdown(
+                "<div style='margin-top:8px; color:#0d47a1;'>Typical values: 10%–50%</div>",
+                unsafe_allow_html=True
+            )
             next3  = row[-1].form_submit_button("Next →")
 
         def _wwr_fraction(val):
             v = _to_float(val)
-            if v is None: 
+            if v is None:
                 return None
             return v if v <= 1.0 else v / 100.0
 
@@ -555,13 +593,19 @@ try:
                     st.error(err)
                 else:
                     with metrics3.container():
-                        row2 = st.columns([2.2, 2.2, 3.6, 2.0])
-                        row2[1].metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
-                    # Caution if WWR outside 10%–50%
-                    wwr_frac = _wwr_fraction(wwr)
-                    if wwr_frac is not None and (wwr_frac < 0.10 or wwr_frac > 0.50):
-                        st.warning("WWR seems abnormal. Please confirm before proceeding.")
-                    # remain on step 3
+                        row2 = st.columns([3.4, 6.6])
+                        row2[0].metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
+                        wwr_frac = _wwr_fraction(wwr)
+                        if wwr_frac is not None and (wwr_frac < 0.10 or wwr_frac > 0.50):
+                            row2[1].markdown(
+                                "<div style='margin-top:8px; padding:8px 12px; background:#FFF7ED; "
+                                "border:1px solid #F59E0B; color:#7C2D12; border-radius:8px;'>"
+                                "⚠️ <b>WWR seems abnormal.</b> Please confirm before proceeding."
+                                "</div>",
+                                unsafe_allow_html=True
+                            )
+                        else:
+                            row2[1].markdown("&nbsp;", unsafe_allow_html=True)
             elif next3:
                 ok, _, err = save_building_inputs(token, sid, calc_for_wwr=False)
                 if ok:
@@ -570,7 +614,7 @@ try:
                     st.error(err)
 
     # ---------------------
-    # STEP 4: Rates & CSW (FORM in a container) — flicker-free jump to results
+    # STEP 4: Rates & CSW
     # ---------------------
     elif step == 4:
         st.header("4) Secondary Window & Rates")
@@ -595,17 +639,16 @@ try:
             else:
                 st.warning("Please complete the product and both rates.")
 
-    # --------------
+    # -----------------
     # STEP 5: Results
-    # --------------
+    # -----------------
     elif step == 5:
         st.header("Results")
 
         try:
-            calculate(token, sid)  # one calc to include everything
+            calculate(token, sid)
             res = read_results(token, sid)
 
-            # Group 1: Energy savings (EUI %, Electric kWh, Gas therms)
             st.subheader("Energy Savings")
             g1 = st.columns(3)
             g1[0].metric("EUI Savings",       fmt_pct_one_decimal(res["eui_savings"]))
@@ -614,7 +657,6 @@ try:
 
             st.divider()
 
-            # Group 2: Annual Utility Savings (Electric $, Gas $, Total $)
             st.subheader("Annual Utility Savings")
             g2 = st.columns(3)
             g2[0].metric("Electric Cost Savings", fmt_money_two_decimals(res["elec_cost"]))
@@ -623,7 +665,6 @@ try:
 
             st.divider()
 
-            # Summary table — read back from workbook cells (includes WWR under Hours)
             st.subheader("Your Inputs (Summary)")
             summary_rows = read_input_summary_from_workbook(token, sid)
             st.table(summary_rows)
@@ -637,7 +678,6 @@ try:
                 set_step(4); st.rerun()
         with cols[-1]:
             if st.button("Start Over", use_container_width=True):
-                # Close Excel session and reset UI (keeps login & drive item)
                 close_session(token)
                 keep = {"msal_cache_serialized", "drive_item"}
                 for k in list(st.session_state.keys()):
