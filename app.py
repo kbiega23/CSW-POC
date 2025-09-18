@@ -1,6 +1,6 @@
 # app.py — Winsert Savings Calculator (Office)
-# Fast 5-step wizard with blue branding, token cache, cached State/City,
-# Forms for all steps, minimal Graph calls, and snappy navigation.
+# Fast 5-step wizard with inline climate/WWR metrics next to buttons,
+# blue branding, token cache, cached State/City, and an input summary on results.
 
 import os
 import re
@@ -42,12 +42,13 @@ st.markdown(
       .block-container {{ max-width: 950px; }}
       h1, h2, h3, h4 {{ color: {ACCENT}; }}
       div.stButton > button {{
-        background: {PRIMARY}; color: #fff; border: 0; border-radius: 10px; padding: 0.5rem 1rem;
+        background: {PRIMARY}; color: #fff; border: 0; border-radius: 10px; padding: 0.6rem 1.0rem;
+        white-space: nowrap;  /* keep label on one line */
       }}
       div.stButton > button:hover {{ filter: brightness(0.95); }}
       .stProgress > div > div > div > div {{ background-color: {PRIMARY}; }}
       [data-testid="stMetric"] {{
-        background: #f7faff; border: 1px solid #e6efff; border-radius: 12px; padding: .75rem;
+        background: #f7faff; border: 1px solid #e6efff; border-radius: 12px; padding: .65rem;
       }}
       hr {{ border-top: 1px solid #e6efff; }}
     </style>
@@ -268,7 +269,7 @@ def apply_state(token, sid, state):
         return True
     return False
 
-# Step 2: Apply city; only calc when checking climate
+# Step 2: Apply city; optionally calc climate
 def apply_city(token, sid, city, do_calc=False):
     if not city:
         return False, None, None
@@ -279,10 +280,12 @@ def apply_city(token, sid, city, do_calc=False):
         cdd = get_cell(token, sid, "C24")
         st.session_state["hdd_latest"] = hdd
         st.session_state["cdd_latest"] = cdd
+        st.session_state["climate_checked"] = True
         return True, hdd, cdd
+    st.session_state["climate_checked"] = False
     return True, None, None
 
-# Step 3: Building info; calc only when checking WWR
+# Step 3: Building inputs; optionally calc WWR
 def save_building_inputs(token, sid, calc_for_wwr=False):
     bldg_area = st.session_state.get("bldg_area")
     floors    = st.session_state.get("floors")
@@ -316,30 +319,11 @@ def save_building_inputs(token, sid, calc_for_wwr=False):
         calculate(token, sid)
         wwr = get_cell(token, sid, "F28")
         st.session_state["wwr_latest"] = wwr
-        st.session_state["step3_applied"] = True
+        st.session_state["wwr_checked"] = True
         return True, wwr
 
-    # No calc path (faster)
-    st.session_state["step3_applied"] = True
+    st.session_state["wwr_checked"] = False
     return True, None
-
-# Step 4: Rates; no calc here (faster), results page will calc
-def save_rates(token, sid):
-    cswtyp    = st.session_state.get("cswtyp")
-    elec_rate = st.session_state.get("elec_rate")
-    gas_rate  = st.session_state.get("gas_rate")
-    ready = all([
-        bool(cswtyp),
-        (elec_rate is not None) and (elec_rate >= 0.0),
-        (gas_rate  is not None) and (gas_rate  >= 0.0),
-    ])
-    if not ready:
-        return False
-    set_cell(token, sid, "F26", cswtyp)
-    set_cell(token, sid, "C27", elec_rate)
-    set_cell(token, sid, "C28", gas_rate)
-    st.session_state["step4_applied"] = True
-    return True
 
 def read_results(token, sid):
     return {
@@ -358,10 +342,15 @@ def read_results(token, sid):
 token = acquire_token()
 sid = create_session(token)
 
-show_logo()
+# Header & progress
+def show_header_and_progress():
+    show_logo()
+    step = get_step()
+    progress_bar(step, total=5)
+    st.markdown(f"### Step {step} of 5")
+
+show_header_and_progress()
 step = get_step()
-progress_bar(step, total=5)
-st.markdown(f"### Step {step} of 5")
 
 try:
     # Load state/city lists up front (cached)
@@ -385,7 +374,7 @@ try:
                 st.warning("Please select a state to continue.")
 
     # -----------------
-    # STEP 2: City (FORM) + Climate (only on 'Check Climate')
+    # STEP 2: City (FORM) + Climate inline on demand
     # -----------------
     elif step == 2:
         st.header("2) Select City")
@@ -400,7 +389,6 @@ try:
         if not state:
             st.info("Please select a State first.")
         else:
-            # Reset city if state changed
             if st.session_state.get("last_state_for_city") != state:
                 st.session_state.pop("city_sel", None)
                 st.session_state["last_state_for_city"] = state
@@ -408,35 +396,36 @@ try:
             city_options = state_to_cities.get(state, [])
             with st.form("step2_city_form", clear_on_submit=False):
                 st.selectbox("City", city_options, key="city_sel")
-                fcols = st.columns([1, 1, 6, 2])
-                check2 = fcols[0].form_submit_button("Check Climate")
-                next2  = fcols[-1].form_submit_button("Next →")
+                # Row with button + space for inline metrics
+                row = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
+                check2 = row[0].form_submit_button("Check Climate")
+                next2  = row[-1].form_submit_button("Next →")
 
+            # Handle actions
             if check2:
                 city = st.session_state.get("city_sel")
                 ok, hdd, cdd = apply_city(token, sid, city, do_calc=True)
                 if not ok:
                     st.warning("Please select a city to continue.")
                 else:
-                    st.divider()
-                    st.subheader("Climate check")
-                    cols = st.columns(2)
-                    cols[0].metric("Heating Degree Days", fmt_int(hdd))   # unitless
-                    cols[1].metric("Cooling Degree Days", fmt_int(cdd))   # unitless
-                    # Stay on step 2 after climate check
+                    # Inline metrics in the same row layout (recreate row so it's right under the form)
+                    row2 = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
+                    row2[1].metric("Heating Degree Days", fmt_int(hdd))
+                    row2[2].metric("Cooling Degree Days", fmt_int(cdd))
+                    # Stay on step 2
             elif next2:
                 city = st.session_state.get("city_sel")
-                ok, _, _ = apply_city(token, sid, city, do_calc=False)  # no calc here (faster)
+                ok, _, _ = apply_city(token, sid, city, do_calc=False)  # fast path
                 if ok:
                     set_step(3); st.rerun()
                 else:
                     st.warning("Please select a city to continue.")
             else:
-                # If they haven't requested climate check, do not show HDD/CDD here
+                # no-op until a button is pressed
                 pass
 
     # -------------------------
-    # STEP 3: Building details (FORM) — "Check WWR"
+    # STEP 3: Building details (FORM) — inline WWR next to button
     # -------------------------
     elif step == 3:
         st.header("3) Building Information")
@@ -463,21 +452,21 @@ try:
             col1.number_input("Annual Operating Hours (hrs/yr)", min_value=0, step=100, key="hours")
             col2.number_input("CSW Installed (ft²)",             min_value=0.0, step=50.0, key="csw_sf")
 
-            fcols = st.columns([1, 1, 6, 2])
-            check3 = fcols[0].form_submit_button("Check WWR")
-            next3  = fcols[-1].form_submit_button("Next →")
+            # Row with buttons + space for inline WWR metric
+            row = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
+            check3 = row[0].form_submit_button("Check WWR")
+            next3  = row[-1].form_submit_button("Next →")
 
         if check3:
             ok, wwr = save_building_inputs(token, sid, calc_for_wwr=True)
             if not ok:
                 st.warning("Please complete all building fields.")
             else:
-                st.divider()
-                st.subheader("Envelope check")
-                st.metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
-                # Stay on step 3 after check
+                row2 = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
+                row2[1].metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
+                # Stay on step 3
         elif next3:
-            ok, _ = save_building_inputs(token, sid, calc_for_wwr=False)  # no calc (faster)
+            ok, _ = save_building_inputs(token, sid, calc_for_wwr=False)  # fast path, no calc
             if ok:
                 set_step(4); st.rerun()
             else:
@@ -500,8 +489,8 @@ try:
             col1.selectbox("Type of CSW Analyzed", ["Single", "Double"], key="cswtyp")
             col2.number_input("Electric Rate ($/kWh)", min_value=0.0, step=0.01, key="elec_rate")
             col1.number_input("Natural Gas Rate ($/therm)", min_value=0.0, step=0.01, key="gas_rate")
-            fcols = st.columns([1, 1, 6, 2])
-            next4  = fcols[-1].form_submit_button("See Results →")
+            row = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
+            next4 = row[-1].form_submit_button("See Results →")
 
         if next4:
             if save_rates(token, sid):
@@ -515,7 +504,7 @@ try:
     elif step == 5:
         st.header("5) Results")
         try:
-            calculate(token, sid)  # single calc here to include all prior inputs
+            calculate(token, sid)  # one calc to include everything
             res = read_results(token, sid)
 
             # Group 1: Energy savings (EUI %, Electric kWh, Gas therms)
@@ -534,10 +523,37 @@ try:
             g2[1].metric("Gas Cost Savings",      fmt_money_two_decimals(res["gas_cost"]))
             g2[2].metric("Total Savings",         fmt_money_no_decimals(res["total_savings"]))
 
-            # Optional: show WWR again
             st.divider()
+
+            # Envelope (WWR)
             st.subheader("Envelope")
             st.metric("Window-to-Wall Ratio", fmt_pct_one_decimal(res["wwr"]))
+
+            st.divider()
+
+            # Summary table of inputs
+            st.subheader("Your Inputs (Summary)")
+            inputs_summary = [
+                ("State", st.session_state.get("selected_state")),
+                ("City", st.session_state.get("city_sel")),
+                ("Building Area (ft²)", st.session_state.get("bldg_area")),
+                ("Number of Floors", st.session_state.get("floors")),
+                ("HVAC System Type", st.session_state.get("hvac")),
+                ("Existing Window Type", st.session_state.get("existw")),
+                ("Heating Fuel", st.session_state.get("fuel")),
+                ("Cooling Installed?", st.session_state.get("cool")),
+                ("Annual Operating Hours (hrs/yr)", st.session_state.get("hours")),
+                ("CSW Installed (ft²)", st.session_state.get("csw_sf")),
+                ("Type of CSW Analyzed", st.session_state.get("cswtyp")),
+                ("Electric Rate ($/kWh)", st.session_state.get("elec_rate")),
+                ("Natural Gas Rate ($/therm)", st.session_state.get("gas_rate")),
+            ]
+            # prettify numeric display a bit
+            def pretty(v):
+                if isinstance(v, float) and v.is_integer():
+                    return int(v)
+                return v
+            st.table({k: [pretty(v)] for k, v in inputs_summary})
 
         except requests.HTTPError as e:
             st.error(f"HTTP {e.response.status_code}: {e.response.text[:400]}")
@@ -557,5 +573,5 @@ try:
                 set_step(1); st.rerun()
 
 finally:
-    # Keep the Excel session open across reruns for speed (do NOT close here)
+    # Keep Excel session open across reruns for speed
     pass
