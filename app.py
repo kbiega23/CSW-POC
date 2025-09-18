@@ -1,7 +1,7 @@
 # app.py — Winsert Savings Calculator (Office)
-# Flicker-free wizard: Step 1 non-form, Steps 2–4 wrapped in containers + .empty()
-# Inline climate/WWR metrics, blue theme, token cache, Graph Excel session reuse,
-# tidy Results page with input summary (incl. WWR).
+# Flicker-free wizard: Step 1 non-form, Step 2 non-form with deferred Graph write,
+# Steps 3–4 in containers with .empty() before rerun. Inline climate/WWR metrics,
+# blue theme, token cache, Graph Excel session reuse, tidy Results with input summary.
 
 import os
 import re
@@ -268,7 +268,7 @@ def set_step(n: int):
 def get_step() -> int:
     return st.session_state.get("step", 1)
 
-# Step 1: Apply state (no calc)
+# Step 1: Apply state
 def apply_state(token, sid, state):
     if state:
         set_cell(token, sid, "C18", state)
@@ -276,21 +276,17 @@ def apply_state(token, sid, state):
         return True
     return False
 
-# Step 2: Apply city; optionally calc climate
-def apply_city(token, sid, city, do_calc=False):
-    if not city:
-        return False, None, None
+# Step 2 helpers
+def write_city_to_workbook(token, sid, city):
     set_cell(token, sid, "C19", city)
-    if do_calc:
-        calculate(token, sid)
-        hdd = get_cell(token, sid, "C23")
-        cdd = get_cell(token, sid, "C24")
-        st.session_state["hdd_latest"] = hdd
-        st.session_state["cdd_latest"] = cdd
-        st.session_state["climate_checked"] = True
-        return True, hdd, cdd
-    st.session_state["climate_checked"] = False
-    return True, None, None
+
+def check_climate(token, sid, city):
+    # Write city (for climate calc), then compute HDD/CDD
+    write_city_to_workbook(token, sid, city)
+    calculate(token, sid)
+    hdd = get_cell(token, sid, "C23")
+    cdd = get_cell(token, sid, "C24")
+    return hdd, cdd
 
 # Step 3: Building inputs; optionally calc WWR
 def save_building_inputs(token, sid, calc_for_wwr=False):
@@ -332,7 +328,14 @@ def save_building_inputs(token, sid, calc_for_wwr=False):
     st.session_state["wwr_checked"] = False
     return True, None
 
-# Step 4: Rates; store inputs (calc deferred to results page)
+# Ensure we commit a deferred city (if user skipped “Check Climate”)
+def ensure_city_committed(token, sid):
+    pending = st.session_state.get("pending_city")
+    if pending:
+        write_city_to_workbook(token, sid, pending)
+        del st.session_state["pending_city"]
+
+# Step 4: Rates; store inputs and commit any pending city
 def save_rates(token, sid):
     cswtyp    = st.session_state.get("cswtyp")
     elec_rate = st.session_state.get("elec_rate")
@@ -344,6 +347,7 @@ def save_rates(token, sid):
     ])
     if not ready:
         return False
+    ensure_city_committed(token, sid)  # <-- commit deferred city here for results
     set_cell(token, sid, "F26", cswtyp)
     set_cell(token, sid, "C27", elec_rate)
     set_cell(token, sid, "C28", gas_rate)
@@ -413,7 +417,7 @@ try:
     states_list, state_to_cities = get_states_and_cities(token, sid)
 
     # -----------------
-    # STEP 1: State (non-form for snappy nav; avoids flicker)
+    # STEP 1: State (non-form for snappy nav)
     # -----------------
     if step == 1:
         st.header("1) Select State")
@@ -428,16 +432,15 @@ try:
                 st.warning("Please select a state to continue.")
 
     # -----------------
-    # STEP 2: City (FORM in a placeholder) + inline Climate metrics
+    # STEP 2: City (non-form inside container) — no Graph call on Next
     # -----------------
     elif step == 2:
         st.header("2) Select City")
 
-        box2 = st.container()           # wrap step in container for flicker-free nav
-        metrics2 = st.empty()           # placeholder for inline metrics under buttons
+        box2 = st.container()
+        metrics2 = st.empty()  # placeholder for inline HDD/CDD
 
         with box2:
-            # Back inside the container so we can empty() before navigating
             cols_top = st.columns([1, 9])
             with cols_top[0]:
                 if st.button("← Back", use_container_width=True):
@@ -447,46 +450,48 @@ try:
             if not state:
                 st.info("Please select a State first.")
             else:
+                # Reset city when state changes
                 if st.session_state.get("last_state_for_city") != state:
                     st.session_state.pop("city_sel", None)
                     st.session_state["last_state_for_city"] = state
 
                 city_options = state_to_cities.get(state, [])
-                with st.form("step2_city_form", clear_on_submit=False):
-                    st.selectbox("City", city_options, key="city_sel")
-                    row = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
-                    check2 = row[0].form_submit_button("Check Climate")
-                    next2  = row[-1].form_submit_button("Next →")
+                st.selectbox("City", city_options, key="city_sel")
 
-        # Actions after form (so we can render metrics into metrics2 container)
+                row = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
+                check2 = row[0].button("Check Climate")
+                next2  = row[-1].button("Next →")
+
+        # Actions (outside box for instant clearing/navigation)
         if step == 2:
             if check2:
                 city = st.session_state.get("city_sel")
-                ok, hdd, cdd = apply_city(token, sid, city, do_calc=True)
-                if not ok:
+                if not city:
                     st.warning("Please select a city to continue.")
                 else:
+                    hdd, cdd = check_climate(token, sid, city)
                     with metrics2.container():
                         row2 = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
                         row2[1].metric("Heating Degree Days", fmt_int(hdd))
                         row2[2].metric("Cooling Degree Days", fmt_int(cdd))
-                    # stay on step 2 (no rerun)
+                    # stay on step 2
             elif next2:
                 city = st.session_state.get("city_sel")
-                ok, _, _ = apply_city(token, sid, city, do_calc=False)  # fast path
-                if ok:
-                    box2.empty(); set_step(3); st.rerun()
-                else:
+                if not city:
                     st.warning("Please select a city to continue.")
+                else:
+                    # Defer writing city to Excel for speed; commit at Step 4
+                    st.session_state["pending_city"] = city
+                    box2.empty(); set_step(3); st.rerun()
 
     # -------------------------
-    # STEP 3: Building details (FORM in a placeholder) + inline WWR
+    # STEP 3: Building details (FORM in a container) — inline WWR
     # -------------------------
     elif step == 3:
         st.header("3) Building Information")
 
-        box3 = st.container()          # wrap step to kill flicker
-        metrics3 = st.empty()          # placeholder for inline WWR metric
+        box3 = st.container()
+        metrics3 = st.empty()
 
         with box3.form("step3_building_form", clear_on_submit=False):
             cols_top = st.columns([1, 9])
@@ -513,7 +518,6 @@ try:
             check3 = row[0].form_submit_button("Check WWR")
             next3  = row[-1].form_submit_button("Next →")
 
-        # Actions after form
         if step == 3:
             if check3:
                 ok, wwr = save_building_inputs(token, sid, calc_for_wwr=True)
@@ -523,16 +527,15 @@ try:
                     with metrics3.container():
                         row2 = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
                         row2[1].metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
-                    # stay on step 3
             elif next3:
-                ok, _ = save_building_inputs(token, sid, calc_for_wwr=False)  # fast path
+                ok, _ = save_building_inputs(token, sid, calc_for_wwr=False)
                 if ok:
                     box3.empty(); set_step(4); st.rerun()
                 else:
                     st.warning("Please complete all building fields.")
 
     # ---------------------
-    # STEP 4: Rates & CSW (FORM in a placeholder) — flicker-free jump to results
+    # STEP 4: Rates & CSW (FORM in a container) — flicker-free jump to results
     # ---------------------
     elif step == 4:
         st.header("4) Secondary Window & Rates")
@@ -561,7 +564,7 @@ try:
     # STEP 5: Results
     # --------------
     elif step == 5:
-        st.header("Results")  # clean title (no "5)")
+        st.header("Results")
 
         try:
             calculate(token, sid)  # one calc to include everything
@@ -599,7 +602,6 @@ try:
                 set_step(4); st.rerun()
         with cols[-1]:
             if st.button("Start Over", use_container_width=True):
-                # Close Excel session and reset UI (keeps login & drive item)
                 close_session(token)
                 keep = {"msal_cache_serialized", "drive_item"}
                 for k in list(st.session_state.keys()):
@@ -608,5 +610,4 @@ try:
                 set_step(1); st.rerun()
 
 finally:
-    # Keep Excel session open across reruns for speed
     pass
