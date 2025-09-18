@@ -51,8 +51,6 @@ st.markdown(
         background: #f7faff; border: 1px solid #e6efff; border-radius: 12px; padding: .65rem;
       }}
       hr {{ border-top: 1px solid #e6efff; }}
-      /* Compact, clean table */
-      table {{}}
       thead th {{ white-space: nowrap; }}
     </style>
     """,
@@ -362,7 +360,7 @@ def read_results(token, sid):
         "wwr":          get_cell(token, sid, "F28"),
     }
 
-# NEW: read back the exact inputs from the workbook (robust summary)
+# Robust input summary direct from workbook (includes WWR under Hours)
 def read_input_summary_from_workbook(token, sid):
     cells = [
         ("State",                               "C18",  "text"),
@@ -374,6 +372,7 @@ def read_input_summary_from_workbook(token, sid):
         ("Heating Fuel",                        "F21",  "text"),
         ("Cooling Installed?",                  "F22",  "text"),
         ("Annual Operating Hours (hrs/yr)",     "F23",  "int"),
+        ("Window-to-Wall Ratio",                "F28",  "pct1"),   # inserted here per request
         ("CSW Installed (ft²)",                 "F27",  "int"),
         ("Type of CSW Analyzed",                "F26",  "text"),
         ("Electric Rate ($/kWh)",               "C27",  "rate"),
@@ -383,10 +382,11 @@ def read_input_summary_from_workbook(token, sid):
     for label, addr, kind in cells:
         v = get_cell(token, sid, addr)
         if kind == "int":
-            vf = _to_float(v)
-            disp = "—" if vf is None else f"{int(round(vf)):,}"
+            vf = _to_float(v); disp = "—" if vf is None else f"{int(round(vf)):,}"
         elif kind == "rate":
             disp = fmt_rate4(v)
+        elif kind == "pct1":
+            disp = fmt_pct_one_decimal(v)
         else:
             disp = "—" if v in (None, "") else str(v)
         rows.append({"Input": label, "Value": disp})
@@ -412,18 +412,16 @@ try:
     states_list, state_to_cities = get_states_and_cities(token, sid)
 
     # -----------------
-    # STEP 1: State (FORM)
+    # STEP 1: State (non-form for snappy nav; avoids flicker)
     # -----------------
     if step == 1:
         st.header("1) Select State")
-        with st.form("step1_state_form", clear_on_submit=False):
-            default_state = st.session_state.get("selected_state")
-            index = states_list.index(default_state) if default_state in states_list else 0
-            state = st.selectbox("State", states_list, index=index, key="state_sel")
-            cols = st.columns([1, 9])
-            next1 = cols[-1].form_submit_button("Next →")
-        if next1:
-            if apply_state(token, sid, state):
+        default_state = st.session_state.get("selected_state")
+        index = states_list.index(default_state) if default_state in states_list else 0
+        st.selectbox("State", states_list, index=index, key="state_sel")
+        cols = st.columns([1, 9])
+        if cols[-1].button("Next →"):
+            if apply_state(token, sid, st.session_state.get("state_sel")):
                 set_step(2); st.rerun()
             else:
                 st.warning("Please select a state to continue.")
@@ -548,7 +546,8 @@ try:
     # STEP 5: Results
     # --------------
     elif step == 5:
-        st.header("5) Results")
+        st.header("Results")  # clean title (no "5)")
+
         try:
             calculate(token, sid)  # one calc to include everything
             res = read_results(token, sid)
@@ -571,16 +570,9 @@ try:
 
             st.divider()
 
-            # Envelope (WWR)
-            st.subheader("Envelope")
-            st.metric("Window-to-Wall Ratio", fmt_pct_one_decimal(res["wwr"]))
-
-            st.divider()
-
-            # Summary table — read back from workbook cells (no blanks)
+            # Summary table — read back from workbook cells (includes WWR under Hours)
             st.subheader("Your Inputs (Summary)")
             summary_rows = read_input_summary_from_workbook(token, sid)
-            # Render as a tidy two-column table
             st.table(summary_rows)
 
         except requests.HTTPError as e:
