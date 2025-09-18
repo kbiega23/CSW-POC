@@ -1,7 +1,10 @@
 # app.py — Winsert Savings Calculator (Office)
-# Flicker-free wizard: Step 1 non-form, Step 2 non-form with deferred Graph write,
-# Steps 3–4 in containers with .empty() before rerun. Inline climate/WWR metrics,
-# blue theme, token cache, Graph Excel session reuse, tidy Results with input summary.
+# Flicker-free wizard with:
+# - Step 1 & 2 non-form (fast), Step 3–4 form-in-container (empty() before rerun)
+# - Inline climate/WWR metrics
+# - "Winsert Lite/Plus" UI mapped to "Single/Double" in Excel
+# - Blue theme, token cache, Graph Excel session reuse
+# - Results summary reads actual workbook cells (incl. WWR under Hours)
 
 import os
 import re
@@ -12,7 +15,7 @@ from msal import PublicClientApplication, SerializableTokenCache
 # =========================
 # Config & sanity checks
 # =========================
-SCOPES = ["User.Read", "Files.ReadWrite"]  # keep reserved scopes (offline_access) out
+SCOPES = ["User.Read", "Files.ReadWrite"]  # do NOT include reserved scopes like offline_access here
 
 guid = re.compile(r"^[0-9a-fA-F-]{36}$")
 bad = []
@@ -268,7 +271,7 @@ def set_step(n: int):
 def get_step() -> int:
     return st.session_state.get("step", 1)
 
-# Step 1: Apply state
+# Step 1: Apply state (no calc)
 def apply_state(token, sid, state):
     if state:
         set_cell(token, sid, "C18", state)
@@ -337,18 +340,24 @@ def ensure_city_committed(token, sid):
 
 # Step 4: Rates; store inputs and commit any pending city
 def save_rates(token, sid):
-    cswtyp    = st.session_state.get("cswtyp")
+    product   = st.session_state.get("csw_product")  # "Winsert Lite" | "Winsert Plus"
     elec_rate = st.session_state.get("elec_rate")
     gas_rate  = st.session_state.get("gas_rate")
+
+    # Map UI label -> Excel value
+    product_map = {"Winsert Lite": "Single", "Winsert Plus": "Double"}
+    excel_value = product_map.get(product)
+
     ready = all([
-        bool(cswtyp),
+        bool(excel_value),
         (elec_rate is not None) and (elec_rate >= 0.0),
         (gas_rate  is not None) and (gas_rate  >= 0.0),
     ])
     if not ready:
         return False
-    ensure_city_committed(token, sid)  # <-- commit deferred city here for results
-    set_cell(token, sid, "F26", cswtyp)
+
+    ensure_city_committed(token, sid)
+    set_cell(token, sid, "F26", excel_value)  # write "Single" or "Double" to Excel
     set_cell(token, sid, "C27", elec_rate)
     set_cell(token, sid, "C28", gas_rate)
     st.session_state["step4_applied"] = True
@@ -377,9 +386,9 @@ def read_input_summary_from_workbook(token, sid):
         ("Heating Fuel",                        "F21",  "text"),
         ("Cooling Installed?",                  "F22",  "text"),
         ("Annual Operating Hours (hrs/yr)",     "F23",  "int"),
-        ("Window-to-Wall Ratio",                "F28",  "pct1"),  # here per request
+        ("Window-to-Wall Ratio",                "F28",  "pct1"),
         ("CSW Installed (ft²)",                 "F27",  "int"),
-        ("Type of CSW Analyzed",                "F26",  "text"),
+        ("Type of CSW Analyzed",                "F26",  "csw"),  # show product names
         ("Electric Rate ($/kWh)",               "C27",  "rate"),
         ("Natural Gas Rate ($/therm)",          "C28",  "rate"),
     ]
@@ -392,6 +401,8 @@ def read_input_summary_from_workbook(token, sid):
             disp = fmt_rate4(v)
         elif kind == "pct1":
             disp = fmt_pct_one_decimal(v)
+        elif kind == "csw":
+            disp = {"Single": "Winsert Lite", "Double": "Winsert Plus"}.get(str(v), "—" if not v else str(v))
         else:
             disp = "—" if v in (None, "") else str(v)
         rows.append({"Input": label, "Value": disp})
@@ -548,7 +559,7 @@ try:
                     box4.empty(); set_step(3); st.rerun()
 
             col1, col2 = st.columns(2)
-            col1.selectbox("Type of CSW Analyzed", ["Single", "Double"], key="cswtyp")
+            col1.selectbox("Secondary Window Product", ["Winsert Lite", "Winsert Plus"], key="csw_product")
             col2.number_input("Electric Rate ($/kWh)", min_value=0.0, step=0.01, key="elec_rate")
             col1.number_input("Natural Gas Rate ($/therm)", min_value=0.0, step=0.01, key="gas_rate")
             row = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
@@ -558,7 +569,7 @@ try:
             if save_rates(token, sid):
                 box4.empty(); set_step(5); st.rerun()
             else:
-                st.warning("Please complete the CSW type and both rates.")
+                st.warning("Please complete the product and both rates.")
 
     # --------------
     # STEP 5: Results
@@ -602,6 +613,7 @@ try:
                 set_step(4); st.rerun()
         with cols[-1]:
             if st.button("Start Over", use_container_width=True):
+                # Close Excel session and reset UI (keeps login & drive item)
                 close_session(token)
                 keep = {"msal_cache_serialized", "drive_item"}
                 for k in list(st.session_state.keys()):
@@ -610,4 +622,5 @@ try:
                 set_step(1); st.rerun()
 
 finally:
+    # Keep Excel session open across reruns for speed
     pass
