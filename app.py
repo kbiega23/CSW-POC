@@ -1,6 +1,7 @@
 # app.py — Winsert Savings Calculator (Office)
-# Fast 5-step wizard with inline climate/WWR metrics next to buttons,
-# blue branding, token cache, cached State/City, and an input summary on results.
+# Flicker-free wizard: Step 1 non-form, Steps 2–4 wrapped in containers + .empty()
+# Inline climate/WWR metrics, blue theme, token cache, Graph Excel session reuse,
+# tidy Results page with input summary (incl. WWR).
 
 import os
 import re
@@ -372,7 +373,7 @@ def read_input_summary_from_workbook(token, sid):
         ("Heating Fuel",                        "F21",  "text"),
         ("Cooling Installed?",                  "F22",  "text"),
         ("Annual Operating Hours (hrs/yr)",     "F23",  "int"),
-        ("Window-to-Wall Ratio",                "F28",  "pct1"),   # inserted here per request
+        ("Window-to-Wall Ratio",                "F28",  "pct1"),  # here per request
         ("CSW Installed (ft²)",                 "F27",  "int"),
         ("Type of CSW Analyzed",                "F26",  "text"),
         ("Electric Rate ($/kWh)",               "C27",  "rate"),
@@ -427,62 +428,72 @@ try:
                 st.warning("Please select a state to continue.")
 
     # -----------------
-    # STEP 2: City (FORM) + Climate inline on demand
+    # STEP 2: City (FORM in a placeholder) + inline Climate metrics
     # -----------------
     elif step == 2:
         st.header("2) Select City")
 
-        # Back
-        cols_top = st.columns([1, 9])
-        with cols_top[0]:
-            if st.button("← Back", use_container_width=True):
-                set_step(1); st.rerun()
+        box2 = st.container()           # wrap step in container for flicker-free nav
+        metrics2 = st.empty()           # placeholder for inline metrics under buttons
 
-        state = st.session_state.get("selected_state")
-        if not state:
-            st.info("Please select a State first.")
-        else:
-            if st.session_state.get("last_state_for_city") != state:
-                st.session_state.pop("city_sel", None)
-                st.session_state["last_state_for_city"] = state
+        with box2:
+            # Back inside the container so we can empty() before navigating
+            cols_top = st.columns([1, 9])
+            with cols_top[0]:
+                if st.button("← Back", use_container_width=True):
+                    box2.empty(); set_step(1); st.rerun()
 
-            city_options = state_to_cities.get(state, [])
-            with st.form("step2_city_form", clear_on_submit=False):
-                st.selectbox("City", city_options, key="city_sel")
-                row = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
-                check2 = row[0].form_submit_button("Check Climate")
-                next2  = row[-1].form_submit_button("Next →")
+            state = st.session_state.get("selected_state")
+            if not state:
+                st.info("Please select a State first.")
+            else:
+                if st.session_state.get("last_state_for_city") != state:
+                    st.session_state.pop("city_sel", None)
+                    st.session_state["last_state_for_city"] = state
 
+                city_options = state_to_cities.get(state, [])
+                with st.form("step2_city_form", clear_on_submit=False):
+                    st.selectbox("City", city_options, key="city_sel")
+                    row = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
+                    check2 = row[0].form_submit_button("Check Climate")
+                    next2  = row[-1].form_submit_button("Next →")
+
+        # Actions after form (so we can render metrics into metrics2 container)
+        if step == 2:
             if check2:
                 city = st.session_state.get("city_sel")
                 ok, hdd, cdd = apply_city(token, sid, city, do_calc=True)
                 if not ok:
                     st.warning("Please select a city to continue.")
                 else:
-                    row2 = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
-                    row2[1].metric("Heating Degree Days", fmt_int(hdd))
-                    row2[2].metric("Cooling Degree Days", fmt_int(cdd))
+                    with metrics2.container():
+                        row2 = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
+                        row2[1].metric("Heating Degree Days", fmt_int(hdd))
+                        row2[2].metric("Cooling Degree Days", fmt_int(cdd))
+                    # stay on step 2 (no rerun)
             elif next2:
                 city = st.session_state.get("city_sel")
-                ok, _, _ = apply_city(token, sid, city, do_calc=False)
+                ok, _, _ = apply_city(token, sid, city, do_calc=False)  # fast path
                 if ok:
-                    set_step(3); st.rerun()
+                    box2.empty(); set_step(3); st.rerun()
                 else:
                     st.warning("Please select a city to continue.")
 
     # -------------------------
-    # STEP 3: Building details (FORM) — inline WWR next to button
+    # STEP 3: Building details (FORM in a placeholder) + inline WWR
     # -------------------------
     elif step == 3:
         st.header("3) Building Information")
 
-        # Back
-        cols_top = st.columns([1, 9])
-        with cols_top[0]:
-            if st.button("← Back", use_container_width=True):
-                set_step(2); st.rerun()
+        box3 = st.container()          # wrap step to kill flicker
+        metrics3 = st.empty()          # placeholder for inline WWR metric
 
-        with st.form("step3_building_form", clear_on_submit=False):
+        with box3.form("step3_building_form", clear_on_submit=False):
+            cols_top = st.columns([1, 9])
+            with cols_top[0]:
+                if st.form_submit_button("← Back"):
+                    box3.empty(); set_step(2); st.rerun()
+
             col1, col2 = st.columns(2)
             col1.number_input("Building Area (ft²)", min_value=0.0, step=100.0, key="bldg_area")
             col2.number_input("Number of Floors",   min_value=0,   step=1,      key="floors")
@@ -502,33 +513,37 @@ try:
             check3 = row[0].form_submit_button("Check WWR")
             next3  = row[-1].form_submit_button("Next →")
 
-        if check3:
-            ok, wwr = save_building_inputs(token, sid, calc_for_wwr=True)
-            if not ok:
-                st.warning("Please complete all building fields.")
-            else:
-                row2 = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
-                row2[1].metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
-        elif next3:
-            ok, _ = save_building_inputs(token, sid, calc_for_wwr=False)
-            if ok:
-                set_step(4); st.rerun()
-            else:
-                st.warning("Please complete all building fields.")
+        # Actions after form
+        if step == 3:
+            if check3:
+                ok, wwr = save_building_inputs(token, sid, calc_for_wwr=True)
+                if not ok:
+                    st.warning("Please complete all building fields.")
+                else:
+                    with metrics3.container():
+                        row2 = st.columns([2.2, 2.2, 2.2, 3.4, 2.0])
+                        row2[1].metric("Window-to-Wall Ratio", fmt_pct_one_decimal(wwr))
+                    # stay on step 3
+            elif next3:
+                ok, _ = save_building_inputs(token, sid, calc_for_wwr=False)  # fast path
+                if ok:
+                    box3.empty(); set_step(4); st.rerun()
+                else:
+                    st.warning("Please complete all building fields.")
 
     # ---------------------
-    # STEP 4: Rates & CSW (FORM) — only "See Results →"
+    # STEP 4: Rates & CSW (FORM in a placeholder) — flicker-free jump to results
     # ---------------------
     elif step == 4:
         st.header("4) Secondary Window & Rates")
 
-        # Back
-        cols_top = st.columns([1, 9])
-        with cols_top[0]:
-            if st.button("← Back", use_container_width=True):
-                set_step(3); st.rerun()
+        box4 = st.container()
+        with box4.form("step4_rates_form", clear_on_submit=False):
+            cols_top = st.columns([1, 9])
+            with cols_top[0]:
+                if st.form_submit_button("← Back"):
+                    box4.empty(); set_step(3); st.rerun()
 
-        with st.form("step4_rates_form", clear_on_submit=False):
             col1, col2 = st.columns(2)
             col1.selectbox("Type of CSW Analyzed", ["Single", "Double"], key="cswtyp")
             col2.number_input("Electric Rate ($/kWh)", min_value=0.0, step=0.01, key="elec_rate")
@@ -538,7 +553,7 @@ try:
 
         if next4:
             if save_rates(token, sid):
-                set_step(5); st.rerun()
+                box4.empty(); set_step(5); st.rerun()
             else:
                 st.warning("Please complete the CSW type and both rates.")
 
