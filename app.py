@@ -14,6 +14,7 @@ import re
 import requests
 import streamlit as st
 from msal import PublicClientApplication, SerializableTokenCache
+import base64
 
 # =========================
 # Config & sanity checks
@@ -133,10 +134,49 @@ def acquire_token() -> str:
 # =========================
 # Graph helpers (with session reuse)
 # =========================
+# def _item_base(token: str) -> str:
+#     if "drive_item" not in st.session_state:
+#         r = requests.get(f"{GRAPH}{WORKBOOK_PATH}", headers={"Authorization": f"Bearer {token}"})
+#         r.raise_for_status()
+#         st.session_state["drive_item"] = r.json()
+#     di = st.session_state["drive_item"]
+#     return f"{GRAPH}/drives/{di['parentReference']['driveId']}/items/{di['id']}/workbook"
+
+def _resolve_driveitem_from_share_link(token: str, url: str):
+    # Base64url encode without padding per Graph spec
+    b64 = base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")
+    r = requests.get(
+        f"{GRAPH}/shares/u!{b64}/driveItem",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    r.raise_for_status()
+    return r.json()  # contains parentReference.driveId and id
+
 def _item_base(token: str) -> str:
+    if not token or not isinstance(token, str) or not token.strip():
+        st.error("Internal error: empty access token before Graph call.")
+        st.stop()
+
+    # Prefer SHARE_LINK if provided
+    share_link = st.secrets.get("SHARE_LINK", "").strip()
+    if share_link:
+        if "drive_item" not in st.session_state:
+            di = _resolve_driveitem_from_share_link(token, share_link)
+            st.session_state["drive_item"] = di
+        di = st.session_state["drive_item"]
+        return f"{GRAPH}/drives/{di['parentReference']['driveId']}/items/{di['id']}/workbook"
+
+    # Fallback to WORKBOOK_PATH (path form)
+    wp = st.secrets.get("WORKBOOK_PATH", "").strip()
+    if not wp:
+        st.error("Neither SHARE_LINK nor WORKBOOK_PATH is set in secrets.")
+        st.stop()
+
     if "drive_item" not in st.session_state:
-        r = requests.get(f"{GRAPH}{WORKBOOK_PATH}", headers={"Authorization": f"Bearer {token}"})
-        r.raise_for_status()
+        r = requests.get(f"{GRAPH}{wp}", headers={"Authorization": f"Bearer {token}"})
+        if r.status_code >= 400:
+            st.error(f"Graph {r.status_code} resolving workbook: {r.text[:400]}")
+            st.stop()
         st.session_state["drive_item"] = r.json()
     di = st.session_state["drive_item"]
     return f"{GRAPH}/drives/{di['parentReference']['driveId']}/items/{di['id']}/workbook"
