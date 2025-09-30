@@ -127,6 +127,7 @@ def acquire_token() -> str:
         st.error(f"Auth error: {res.get('error_description', res)}")
         st.stop()
     _save_cache_obj(cache)
+    print(res)
     return res["access_token"]
 
 # =========================
